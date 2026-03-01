@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -24,6 +25,7 @@ import (
 // Runtime interface for agent runtime (allows mocking in tests)
 type Runtime interface {
 	Run(ctx context.Context, req api.Request) (*api.Response, error)
+	RunStream(ctx context.Context, req api.Request) (<-chan api.StreamEvent, error)
 	Close()
 }
 
@@ -34,6 +36,10 @@ type runtimeAdapter struct {
 
 func (r *runtimeAdapter) Run(ctx context.Context, req api.Request) (*api.Response, error) {
 	return r.rt.Run(ctx, req)
+}
+
+func (r *runtimeAdapter) RunStream(ctx context.Context, req api.Request) (<-chan api.StreamEvent, error) {
+	return r.rt.RunStream(ctx, req)
 }
 
 func (r *runtimeAdapter) Close() {
@@ -187,6 +193,11 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Gateway, error) {
 	}
 	g.channels = chMgr
 
+	// Set workspace on Telegram channel for file saving.
+	if tc, ok := chMgr.GetChannel("telegram").(*channel.TelegramChannel); ok {
+		tc.SetWorkspace(cfg.Agent.Workspace)
+	}
+
 	return g, nil
 }
 
@@ -272,12 +283,53 @@ func (g *Gateway) Run(ctx context.Context) error {
 	return g.Shutdown()
 }
 
+// StreamSender is an optional interface channels can implement for streaming output.
+type StreamSender interface {
+	SendStream(ctx context.Context, chatID string, metadata map[string]any, events <-chan api.StreamEvent) error
+}
+
 func (g *Gateway) processLoop(ctx context.Context) {
 	for {
 		select {
 		case msg := <-g.bus.Inbound:
 			log.Printf("[gateway] inbound from %s/%s: %s", msg.Channel, msg.SenderID, truncate(msg.Content, 80))
 
+			// Look up the target channel for feedback hooks
+			var ch channel.Channel
+			if g.channels != nil {
+				ch = g.channels.GetChannel(msg.Channel)
+			}
+
+			// Pre-processing feedback
+			if ch != nil {
+				if tc, ok := ch.(*channel.TelegramChannel); ok {
+					chatIDInt := mustParseChatID(msg.ChatID)
+					msgID := extractMessageID(msg.Metadata)
+					tc.PreProcessFeedback(chatIDInt, msgID)
+				}
+			}
+
+			// Check if channel supports streaming
+			if ch != nil {
+				if ss, ok := ch.(StreamSender); ok {
+					events, err := g.runAgentStream(ctx, msg.Content, msg.SessionKey(), msg.ContentBlocks)
+					if err != nil {
+						log.Printf("[gateway] agent stream error: %v", err)
+						g.bus.Outbound <- bus.OutboundMessage{
+							Channel: msg.Channel,
+							ChatID:  msg.ChatID,
+							Content: "Sorry, I encountered an error processing your message.",
+						}
+						continue
+					}
+					if err := ss.SendStream(ctx, msg.ChatID, msg.Metadata, events); err != nil {
+						log.Printf("[gateway] SendStream error: %v", err)
+					}
+					continue
+				}
+			}
+
+			// Non-streaming path
 			result, err := g.runAgent(ctx, msg.Content, msg.SessionKey(), msg.ContentBlocks)
 			if err != nil {
 				log.Printf("[gateway] agent error: %v", err)
@@ -286,9 +338,10 @@ func (g *Gateway) processLoop(ctx context.Context) {
 
 			if result != "" {
 				g.bus.Outbound <- bus.OutboundMessage{
-					Channel: msg.Channel,
-					ChatID:  msg.ChatID,
-					Content: result,
+					Channel:  msg.Channel,
+					ChatID:   msg.ChatID,
+					Content:  result,
+					Metadata: msg.Metadata,
 				}
 			}
 		case <-ctx.Done():
@@ -312,4 +365,43 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+// runAgentStream calls RunStream on the runtime and returns the event channel.
+func (g *Gateway) runAgentStream(ctx context.Context, prompt, sessionID string, contentBlocks []model.ContentBlock) (<-chan api.StreamEvent, error) {
+	blocks := contentBlocks
+	if len(contentBlocks) > 0 && strings.TrimSpace(prompt) != "" {
+		blocks = make([]model.ContentBlock, 0, len(contentBlocks)+1)
+		blocks = append(blocks, model.ContentBlock{Type: model.ContentBlockText, Text: prompt})
+		blocks = append(blocks, contentBlocks...)
+		prompt = ""
+	}
+	return g.runtime.RunStream(ctx, api.Request{
+		Prompt:        prompt,
+		ContentBlocks: blocks,
+		SessionID:     sessionID,
+	})
+}
+
+// mustParseChatID parses a chat ID string, returning 0 on error.
+func mustParseChatID(s string) int64 {
+	v, _ := strconv.ParseInt(s, 10, 64)
+	return v
+}
+
+// extractMessageID extracts message_id from metadata map.
+func extractMessageID(meta map[string]any) int {
+	if meta == nil {
+		return 0
+	}
+	if v, ok := meta["message_id"]; ok {
+		switch id := v.(type) {
+		case int:
+			return id
+		case int64:
+			return int(id)
+		case float64:
+			return int(id)
+		}
+	}
+	return 0
 }

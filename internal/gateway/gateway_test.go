@@ -39,6 +39,22 @@ func (m *mockRuntime) Run(ctx context.Context, req api.Request) (*api.Response, 
 func (m *mockRuntime) Close() {
 	m.closed = true
 }
+func (m *mockRuntime) RunStream(ctx context.Context, req api.Request) (<-chan api.StreamEvent, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	ch := make(chan api.StreamEvent, 1)
+	go func() {
+		defer close(ch)
+		if m.response != nil && m.response.Result != nil {
+			ch <- api.StreamEvent{
+				Type:  api.EventContentBlockDelta,
+				Delta: &api.Delta{Text: m.response.Result.Output},
+			}
+		}
+	}()
+	return ch, nil
+}
 
 func TestTruncate(t *testing.T) {
 	tests := []struct {
