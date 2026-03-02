@@ -3,8 +3,8 @@ package channel
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cexll/agentsdk-go/pkg/model"
 	"github.com/cexll/agentsdk-go/pkg/api"
+	"github.com/cexll/agentsdk-go/pkg/model"
 	"github.com/mymmrac/telego"
 	ta "github.com/mymmrac/telego/telegoapi"
 	"github.com/stellarlinkco/myclaw/internal/bus"
@@ -95,6 +95,7 @@ type roundTripFunc func(req *http.Request) (*http.Response, error)
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
+
 // === Base Channel Tests ===
 
 func TestBaseChannel_Name(t *testing.T) {
@@ -126,6 +127,7 @@ func TestBaseChannel_IsAllowed_WithFilter(t *testing.T) {
 		t.Error("should reject user3")
 	}
 }
+
 // === Telegram Channel Constructor Tests ===
 func TestNewTelegramChannel_NoToken(t *testing.T) {
 	b := bus.NewMessageBus(10)
@@ -144,6 +146,7 @@ func TestNewTelegramChannel_Valid(t *testing.T) {
 		t.Errorf("Name = %q, want telegram", ch.Name())
 	}
 }
+
 // === toTelegramHTML Tests ===
 func TestToTelegramHTML(t *testing.T) {
 	tests := []struct {
@@ -187,6 +190,7 @@ func TestToTelegramHTML_CodeBlocks(t *testing.T) {
 		})
 	}
 }
+
 // === Channel Manager Tests ===
 func TestChannelManager_Empty(t *testing.T) {
 	b := bus.NewMessageBus(10)
@@ -198,6 +202,7 @@ func TestChannelManager_Empty(t *testing.T) {
 		t.Errorf("expected 0 enabled channels, got %d", len(m.EnabledChannels()))
 	}
 }
+
 // === Mock Channel for Manager Tests ===
 type mockChannel struct {
 	name     string
@@ -207,6 +212,7 @@ type mockChannel struct {
 	stopErr  error
 	sentMsgs []bus.OutboundMessage
 }
+
 func (m *mockChannel) Name() string { return m.name }
 func (m *mockChannel) Start(ctx context.Context) error {
 	m.started = true
@@ -284,6 +290,7 @@ func TestChannelManager_StopAll_Error(t *testing.T) {
 		t.Errorf("StopAll should not return error: %v", err)
 	}
 }
+
 // === Telegram Channel Tests ===
 func TestTelegramChannel_Stop_NotStarted(t *testing.T) {
 	b := bus.NewMessageBus(10)
@@ -379,12 +386,14 @@ func TestTelegramChannel_Send_HTMLError_Retry(t *testing.T) {
 		t.Errorf("Send should succeed after retry: %v", err)
 	}
 }
+
 // retrySendCaller fails the first sendMessage call, succeeds on subsequent ones.
 type retrySendCaller struct {
 	inner     *mockCaller
 	failFirst bool
 	callCount int
 }
+
 func (r *retrySendCaller) Call(ctx context.Context, url string, data *ta.RequestData) (*ta.Response, error) {
 	r.callCount++
 	if r.failFirst && r.callCount == 1 && strings.HasSuffix(url, "/sendMessage") {
@@ -400,6 +409,7 @@ func TestTelegramChannel_Send_BothFail(t *testing.T) {
 		t.Error("expected error when both sends fail")
 	}
 }
+
 // === HandleMessage Tests ===
 func TestTelegramChannel_HandleMessage_Allowed(t *testing.T) {
 	b := bus.NewMessageBus(10)
@@ -739,6 +749,7 @@ func TestTelegramChannel_HandleMessage_ExternalReplyWithPhoto(t *testing.T) {
 		t.Error("expected inbound message")
 	}
 }
+
 // === Forward Message Tests ===
 func TestTelegramChannel_HandleMessage_ForwardWithText(t *testing.T) {
 	b := bus.NewMessageBus(10)
@@ -849,6 +860,7 @@ func TestTelegramChannel_HandleMessage_MediaGroup(t *testing.T) {
 		// Good — no duplicate.
 	}
 }
+
 // === WeChat Image Test (unchanged, no tgbotapi dependency) ===
 func TestWeComCallback_ImageMessage(t *testing.T) {
 	imageData := []byte{0xff, 0xd8, 0xff, 0xd9}
@@ -900,6 +912,7 @@ func TestWeComCallback_ImageMessage(t *testing.T) {
 		t.Fatal("expected inbound message")
 	}
 }
+
 // === InitBot and Start Tests ===
 func TestTelegramChannel_InitBot_InvalidProxy(t *testing.T) {
 	b := bus.NewMessageBus(10)
@@ -997,24 +1010,37 @@ func TestTelegramChannel_SendStream_PureText(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SendStream error: %v", err)
 	}
-	// Should have sendMessage (placeholder) + editMessageText (final)
-	var hasEdit bool
+	var sendCount, deleteCount int
+	var silentSend, normalSend int
 	for _, c := range caller.calls {
-		if strings.HasSuffix(c.URL, "/editMessageText") {
-			hasEdit = true
-		}
-	}
-	if !hasEdit {
-		// Pure text with no throttle delay may go straight to Send
-		var hasSend bool
-		for _, c := range caller.calls {
-			if strings.HasSuffix(c.URL, "/sendMessage") {
-				hasSend = true
+		if strings.HasSuffix(c.URL, "/sendMessage") {
+			sendCount++
+			if c.Data != nil && len(c.Data.BodyRaw) > 0 {
+				var payload map[string]any
+				if err := json.Unmarshal(c.Data.BodyRaw, &payload); err == nil {
+					if v, ok := payload["disable_notification"].(bool); ok && v {
+						silentSend++
+					} else {
+						normalSend++
+					}
+				}
 			}
 		}
-		if !hasSend {
-			t.Error("expected at least one sendMessage or editMessageText call")
+		if strings.HasSuffix(c.URL, "/deleteMessage") {
+			deleteCount++
 		}
+	}
+	if sendCount < 2 {
+		t.Errorf("expected at least 2 sendMessage calls (intermediate + final), got %d", sendCount)
+	}
+	if deleteCount == 0 {
+		t.Error("expected deleteMessage call to clean intermediate message")
+	}
+	if silentSend == 0 {
+		t.Error("expected intermediate message to be sent with disable_notification=true")
+	}
+	if normalSend == 0 {
+		t.Error("expected final report to be sent as a normal notification message")
 	}
 }
 func TestTelegramChannel_SendStream_WithTools(t *testing.T) {
@@ -1033,21 +1059,37 @@ func TestTelegramChannel_SendStream_WithTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SendStream error: %v", err)
 	}
-	// Should have at least: sendMessage (card placeholder) + editMessageText (final text)
-	var sendCount, editCount int
+	var sendCount, deleteCount int
+	var silentSend, normalSend int
 	for _, c := range caller.calls {
 		if strings.HasSuffix(c.URL, "/sendMessage") {
 			sendCount++
+			if c.Data != nil && len(c.Data.BodyRaw) > 0 {
+				var payload map[string]any
+				if err := json.Unmarshal(c.Data.BodyRaw, &payload); err == nil {
+					if v, ok := payload["disable_notification"].(bool); ok && v {
+						silentSend++
+					} else {
+						normalSend++
+					}
+				}
+			}
 		}
-		if strings.HasSuffix(c.URL, "/editMessageText") {
-			editCount++
+		if strings.HasSuffix(c.URL, "/deleteMessage") {
+			deleteCount++
 		}
 	}
-	if sendCount == 0 {
-		t.Error("expected sendMessage for status card placeholder")
+	if sendCount < 3 {
+		t.Errorf("expected at least 3 sendMessage calls (status + content + final), got %d", sendCount)
 	}
-	if editCount == 0 {
-		t.Error("expected editMessageText for final content")
+	if deleteCount < 2 {
+		t.Errorf("expected at least 2 deleteMessage calls for intermediate cleanup, got %d", deleteCount)
+	}
+	if silentSend < 2 {
+		t.Errorf("expected at least 2 silent intermediate messages, got %d", silentSend)
+	}
+	if normalSend == 0 {
+		t.Error("expected final report to be sent as a normal notification message")
 	}
 }
 func TestTelegramChannel_SendStream_Disabled(t *testing.T) {
