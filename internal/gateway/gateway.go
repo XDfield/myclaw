@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/cexll/agentsdk-go/pkg/api"
 	"github.com/cexll/agentsdk-go/pkg/model"
@@ -19,6 +20,8 @@ import (
 	"github.com/stellarlinkco/myclaw/internal/cron"
 	"github.com/stellarlinkco/myclaw/internal/heartbeat"
 	"github.com/stellarlinkco/myclaw/internal/memory"
+	"github.com/stellarlinkco/myclaw/internal/runtimecmd"
+	"github.com/stellarlinkco/myclaw/internal/session"
 	"github.com/stellarlinkco/myclaw/internal/skills"
 )
 
@@ -70,7 +73,7 @@ func newRuntime(cfg *config.Config, sysPrompt string, skillRegs []api.SkillRegis
 			ModelName: cfg.Agent.Model,
 			MaxTokens: cfg.Agent.MaxTokens,
 		}
-	default: // "anthropic" or empty
+	default:
 		provider = &model.AnthropicProvider{
 			APIKey:    cfg.Provider.APIKey,
 			BaseURL:   cfg.Provider.BaseURL,
@@ -91,7 +94,8 @@ func newRuntime(cfg *config.Config, sysPrompt string, skillRegs []api.SkillRegis
 			Threshold:     cfg.AutoCompact.Threshold,
 			PreserveCount: cfg.AutoCompact.PreserveCount,
 		},
-		Skills: skillRegs,
+		Skills:   skillRegs,
+		Commands: runtimecmd.Build(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create runtime: %w", err)
@@ -108,6 +112,7 @@ type Gateway struct {
 	hb         *heartbeat.Service
 	mem        *memory.MemoryStore
 	skillRegs  []api.SkillRegistration
+	sessions   *session.Router
 	signalChan chan os.Signal // for testing
 }
 
@@ -125,6 +130,12 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Gateway, error) {
 
 	// Memory
 	g.mem = memory.NewMemoryStore(cfg.Agent.Workspace)
+
+	router, routerErr := session.New(filepath.Join(cfg.Agent.Workspace, ".myclaw", "session-router.json"))
+	if routerErr != nil {
+		return nil, routerErr
+	}
+	g.sessions = router
 
 	// Build system prompt
 	sysPrompt := g.buildSystemPrompt()
@@ -222,6 +233,17 @@ func (g *Gateway) buildSystemPrompt() string {
 }
 
 func (g *Gateway) runAgent(ctx context.Context, prompt, sessionID string, contentBlocks []model.ContentBlock) (string, error) {
+	resp, err := g.runAgentResponse(ctx, prompt, sessionID, contentBlocks)
+	if err != nil {
+		return "", err
+	}
+	if resp == nil || resp.Result == nil {
+		return "", nil
+	}
+	return resp.Result.Output, nil
+}
+
+func (g *Gateway) runAgentResponse(ctx context.Context, prompt, sessionID string, contentBlocks []model.ContentBlock) (*api.Response, error) {
 	// Workaround: agentsdk-go drops Prompt when ContentBlocks exist (anthropic.go:420-431).
 	// Merge text prompt into ContentBlocks so both text and media reach the API.
 	blocks := contentBlocks
@@ -238,12 +260,9 @@ func (g *Gateway) runAgent(ctx context.Context, prompt, sessionID string, conten
 		SessionID:     sessionID,
 	})
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	if resp == nil || resp.Result == nil {
-		return "", nil
-	}
-	return resp.Result.Output, nil
+	return resp, nil
 }
 
 func (g *Gateway) Run(ctx context.Context) error {
@@ -294,7 +313,35 @@ func (g *Gateway) processLoop(ctx context.Context) {
 		case msg := <-g.bus.Inbound:
 			log.Printf("[gateway] inbound from %s/%s: %s", msg.Channel, msg.SenderID, truncate(msg.Content, 80))
 
-			// Look up the target channel for feedback hooks
+			if handled, err := g.handleBuiltinCommand(msg); handled {
+				if err != nil {
+					log.Printf("[gateway] builtin command error: %v", err)
+					g.bus.Outbound <- bus.OutboundMessage{
+						Channel: msg.Channel,
+						ChatID:  msg.ChatID,
+						Content: "Sorry, I encountered an error processing your command.",
+					}
+				} else {
+					g.bus.Outbound <- bus.OutboundMessage{
+						Channel:  msg.Channel,
+						ChatID:   msg.ChatID,
+						Content:  "✅ Started a fresh session.",
+						Metadata: msg.Metadata,
+					}
+				}
+				continue
+			}
+
+			msgCtx := context.WithValue(ctx, "channel", msg.Channel)
+			msgCtx = context.WithValue(msgCtx, "chatID", msg.ChatID)
+
+			sessionKey := msg.SessionKey()
+			if shouldIsolateSession(msg.Metadata) {
+				sessionKey = isolatedSessionKey(msg)
+			} else if g.sessions != nil {
+				sessionKey = g.sessions.Resolve(sessionKey, sessionKey)
+			}
+
 			var ch channel.Channel
 			if g.channels != nil {
 				ch = g.channels.GetChannel(msg.Channel)
@@ -310,9 +357,9 @@ func (g *Gateway) processLoop(ctx context.Context) {
 			}
 
 			// Check if channel supports streaming
-			if ch != nil {
+			if ch != nil && !shouldForceNonStreaming(msg.Metadata) {
 				if ss, ok := ch.(StreamSender); ok {
-					events, err := g.runAgentStream(ctx, msg.Content, msg.SessionKey(), msg.ContentBlocks)
+					events, err := g.runAgentStream(msgCtx, msg.Content, sessionKey, msg.ContentBlocks)
 					if err != nil {
 						log.Printf("[gateway] agent stream error: %v", err)
 						g.bus.Outbound <- bus.OutboundMessage{
@@ -330,10 +377,28 @@ func (g *Gateway) processLoop(ctx context.Context) {
 			}
 
 			// Non-streaming path
-			result, err := g.runAgent(ctx, msg.Content, msg.SessionKey(), msg.ContentBlocks)
+			resp, err := g.runAgentResponse(msgCtx, msg.Content, sessionKey, msg.ContentBlocks)
 			if err != nil {
 				log.Printf("[gateway] agent error: %v", err)
-				result = "Sorry, I encountered an error processing your message."
+				g.bus.Outbound <- bus.OutboundMessage{
+					Channel: msg.Channel,
+					ChatID:  msg.ChatID,
+					Content: "Sorry, I encountered an error processing your message.",
+				}
+				continue
+			}
+
+			result := ""
+			if resp != nil && resp.Result != nil {
+				result = resp.Result.Output
+			}
+			if postResult, handled, postErr := g.handlePostResponse(msg.SessionKey(), resp); handled || postErr != nil {
+				if postErr != nil {
+					log.Printf("[gateway] post action error: %v", postErr)
+					result = "Sorry, I encountered an error processing your command."
+				} else {
+					result = postResult
+				}
 			}
 
 			if result != "" {
@@ -348,6 +413,26 @@ func (g *Gateway) processLoop(ctx context.Context) {
 			return
 		}
 	}
+}
+
+func shouldForceNonStreaming(meta map[string]any) bool {
+	if meta == nil {
+		return false
+	}
+	v, ok := meta["force_non_streaming"]
+	if !ok {
+		return false
+	}
+	b, ok := v.(bool)
+	return ok && b
+}
+
+func shouldIsolateSession(meta map[string]any) bool {
+	return metadataString(meta, "session_mode") == "isolated"
+}
+
+func isolatedSessionKey(msg bus.InboundMessage) string {
+	return msg.SessionKey() + "#isolated#" + strconv.FormatInt(time.Now().UnixNano(), 10)
 }
 
 func (g *Gateway) Shutdown() error {
@@ -366,6 +451,7 @@ func truncate(s string, n int) string {
 	}
 	return s[:n] + "..."
 }
+
 // runAgentStream calls RunStream on the runtime and returns the event channel.
 func (g *Gateway) runAgentStream(ctx context.Context, prompt, sessionID string, contentBlocks []model.ContentBlock) (<-chan api.StreamEvent, error) {
 	blocks := contentBlocks
