@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,6 +39,7 @@ type TelegramChannel struct {
 	feedback   string // "debug", "normal", "minimal", "silent"
 	streaming  bool
 	workspace  string // workspace root for file saving
+	rootDir    string // telegram assets root, default <workspace>/.telegram
 
 	// Media group buffering: Telegram sends multi-photo messages as separate
 	// Message objects with the same MediaGroupID. We collect them briefly
@@ -63,12 +65,23 @@ func NewTelegramChannel(cfg config.TelegramConfig, b *bus.MessageBus) (*Telegram
 		httpClient:  http.DefaultClient,
 		feedback:    feedback,
 		streaming:   cfg.Streaming,
+		rootDir:     strings.TrimSpace(cfg.RootDir),
 	}
 	return ch, nil
 }
 
 // SetWorkspace sets the workspace directory for file saving.
 func (t *TelegramChannel) SetWorkspace(dir string) { t.workspace = dir }
+
+func (t *TelegramChannel) telegramRoot() string {
+	if root := strings.TrimSpace(t.rootDir); root != "" {
+		return root
+	}
+	if strings.TrimSpace(t.workspace) == "" {
+		return ""
+	}
+	return filepath.Join(t.workspace, ".telegram")
+}
 
 func (t *TelegramChannel) initBot() error {
 	var opts []telego.BotOption
@@ -107,6 +120,9 @@ func (t *TelegramChannel) Start(ctx context.Context) error {
 		return err
 	}
 	t.loadSlashCommands()
+	if err := t.syncBotCommands(ctx); err != nil {
+		return fmt.Errorf("register telegram bot commands: %w", err)
+	}
 
 	ctx, t.cancel = context.WithCancel(ctx)
 
@@ -858,10 +874,15 @@ func (t *TelegramChannel) SendStream(ctx context.Context, chatID string, metadat
 	return t.Send(bus.OutboundMessage{ChatID: chatID, Content: finalText, Metadata: metadata})
 }
 
-// loadSlashCommands loads slash commands from workspace/.telegram/slashes/*.md
+// loadSlashCommands loads slash commands from <telegramRoot>/slashes/*.md.
 func (t *TelegramChannel) loadSlashCommands() {
 	t.slashCommands = make(map[string]telegram.Command)
-	dir := filepath.Join(t.workspace, ".telegram", "slashes")
+	root := t.telegramRoot()
+	if root == "" {
+		log.Printf("[telegram] skip slash command load: telegram root is not configured")
+		return
+	}
+	dir := filepath.Join(root, "slashes")
 	cmds, err := telegram.LoadCommands(dir)
 	if err != nil {
 		log.Printf("[telegram] load slash commands: %v", err)
@@ -871,8 +892,67 @@ func (t *TelegramChannel) loadSlashCommands() {
 		t.slashCommands[cmd.Name] = cmd
 	}
 	if len(t.slashCommands) > 0 {
-		log.Printf("[telegram] loaded %d slash commands", len(t.slashCommands))
+		log.Printf("[telegram] loaded %d slash commands from %s", len(t.slashCommands), dir)
+		return
 	}
+	log.Printf("[telegram] no slash commands found in %s", dir)
+}
+
+func (t *TelegramChannel) syncBotCommands(ctx context.Context) error {
+	if t.bot == nil {
+		return fmt.Errorf("telegram bot not initialized")
+	}
+
+	commands := t.registeredBotCommands()
+	params := &telego.SetMyCommandsParams{Commands: commands}
+
+	if err := t.bot.SetMyCommands(ctx, params); err != nil {
+		return err
+	}
+	if err := t.bot.SetMyCommands(ctx, (&telego.SetMyCommandsParams{Commands: commands}).WithScope(tu.ScopeAllPrivateChats())); err != nil {
+		return err
+	}
+
+	log.Printf("[telegram] registered %d bot commands", len(commands))
+	return nil
+}
+
+func (t *TelegramChannel) registeredBotCommands() []telego.BotCommand {
+	descriptions := map[string]string{
+		"new": "Start a fresh session",
+	}
+	for name, cmd := range t.slashCommands {
+		if strings.TrimSpace(name) == "" {
+			continue
+		}
+		descriptions[name] = telegramCommandDescription(name, cmd.Description)
+	}
+
+	names := make([]string, 0, len(descriptions))
+	for name := range descriptions {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	commands := make([]telego.BotCommand, 0, len(names))
+	for _, name := range names {
+		commands = append(commands, telego.BotCommand{
+			Command:     name,
+			Description: descriptions[name],
+		})
+	}
+	return commands
+}
+
+func telegramCommandDescription(name, desc string) string {
+	desc = strings.TrimSpace(strings.NewReplacer("\r", " ", "\n", " ").Replace(desc))
+	if desc == "" {
+		desc = "Run /" + name
+	}
+	if len(desc) > 256 {
+		desc = desc[:256]
+	}
+	return desc
 }
 
 func (t *TelegramChannel) isSlashCommand(msg *telego.Message) bool {
@@ -898,6 +978,10 @@ func (t *TelegramChannel) handleSlashCommand(msg *telego.Message) {
 		args = strings.Join(parts[1:], " ")
 	}
 
+	if t.handleBuiltinSlashCommand(msg, cmdName) {
+		return
+	}
+
 	cmd, ok := t.slashCommands[cmdName]
 	if !ok {
 		t.bot.SendMessage(context.Background(), tu.Message(tu.ID(msg.Chat.ID), "Unknown command: /"+cmdName))
@@ -905,50 +989,110 @@ func (t *TelegramChannel) handleSlashCommand(msg *telego.Message) {
 	}
 
 	switch cmd.Type {
-	case "instant":
-		sessionID := fmt.Sprintf("%s:%d", telegramChannelName, msg.Chat.ID)
-		resp := t.executeInstantCommand(cmd, args, sessionID)
+	case telegram.CommandTypeLocal:
+		resp := t.executeLocalCommand(cmd, args)
 		t.bot.SendMessage(context.Background(), tu.Message(tu.ID(msg.Chat.ID), resp))
-	case "oneshot", "conversation":
-		chatID := strconv.FormatInt(msg.Chat.ID, 10)
+	case telegram.CommandTypeAgent, telegram.CommandTypePipeline:
+		content := t.composeAgentCommandContent(cmd, cmdName, args)
+		if strings.TrimSpace(content) == "" {
+			t.bot.SendMessage(context.Background(), tu.Message(tu.ID(msg.Chat.ID), "Command is not configured with executable content."))
+			return
+		}
+
+		metadata := map[string]interface{}{
+			"slash_command": cmdName,
+			"slash_type":    string(cmd.Type),
+			"args":          args,
+		}
+		if cmd.Session == telegram.SessionModeIsolated {
+			metadata["session_mode"] = string(cmd.Session)
+		}
+		if !cmd.Streaming {
+			metadata["force_non_streaming"] = true
+		}
+
 		t.bus.Inbound <- bus.InboundMessage{
 			Channel:   telegramChannelName,
 			SenderID:  strconv.FormatInt(msg.From.ID, 10),
-			ChatID:    chatID,
-			Content:   cmd.Prompt,
+			ChatID:    strconv.FormatInt(msg.Chat.ID, 10),
+			Content:   content,
 			Timestamp: time.Now(),
-			Metadata: map[string]interface{}{
-				"slash_command": cmdName,
-				"slash_type":    cmd.Type,
-				"args":          args,
-			},
+			Metadata:  metadata,
 		}
 	}
 }
 
-func (t *TelegramChannel) executeInstantCommand(cmd telegram.Command, args, sessionID string) string {
+func (t *TelegramChannel) handleBuiltinSlashCommand(msg *telego.Message, cmdName string) bool {
+	if cmdName != "new" {
+		return false
+	}
+
+	t.bus.Inbound <- bus.InboundMessage{
+		Channel:   telegramChannelName,
+		SenderID:  strconv.FormatInt(msg.From.ID, 10),
+		ChatID:    strconv.FormatInt(msg.Chat.ID, 10),
+		Timestamp: time.Now(),
+		Metadata: map[string]interface{}{
+			"builtin_command":     "new",
+			"force_non_streaming": true,
+		},
+	}
+	return true
+}
+
+func (t *TelegramChannel) executeLocalCommand(cmd telegram.Command, args string) string {
+	sessionID := fmt.Sprintf("%s:local:%d", telegramChannelName, time.Now().UnixNano())
 	switch cmd.Name {
 	case "status":
 		return "✅ Bot is running"
 	case "help":
-		var sb strings.Builder
-		sb.WriteString("Available commands:\n")
-		for name, c := range t.slashCommands {
-			sb.WriteString(fmt.Sprintf("/%s - %s\n", name, c.Description))
-		}
-		return sb.String()
-	case "compact":
-		return t.executeCompact(sessionID)
+		lines := t.helpLines()
+		return strings.Join(append([]string{"Available commands:"}, lines...), "\n")
 	default:
 		if cmd.Handler != "" {
 			return t.executeHandler(cmd.Handler, args, sessionID)
 		}
-		return cmd.Prompt
+		if cmd.Prompt != "" {
+			return cmd.Prompt
+		}
+		return "✅ Done"
 	}
 }
 
+func (t *TelegramChannel) helpLines() []string {
+	lines := []string{"/new - Start a fresh session"}
+	for name, cmd := range t.slashCommands {
+		line := "/" + name
+		if desc := strings.TrimSpace(cmd.Description); desc != "" {
+			line += " - " + desc
+		}
+		lines = append(lines, line)
+	}
+	sort.Strings(lines)
+	return lines
+}
+
+func (t *TelegramChannel) composeAgentCommandContent(cmd telegram.Command, cmdName, args string) string {
+	if cmd.PassThrough {
+		content := "/" + cmdName
+		if args != "" {
+			content += " " + args
+		}
+		return content
+	}
+
+	prompt := strings.TrimSpace(cmd.Prompt)
+	if args == "" {
+		return prompt
+	}
+	if prompt == "" {
+		return args
+	}
+	return prompt + "\n\nUser input:\n" + args
+}
+
 func (t *TelegramChannel) executeHandler(handler, args, sessionID string) string {
-	handlerPath := filepath.Join(t.workspace, ".telegram", "handlers", handler)
+	handlerPath := filepath.Join(t.telegramRoot(), "handlers", handler)
 	if !filepath.IsAbs(handler) {
 		handler = handlerPath
 	}
@@ -964,8 +1108,4 @@ func (t *TelegramChannel) executeHandler(handler, args, sessionID string) string
 		return fmt.Sprintf("❌ Handler failed: %v\n%s", err, output)
 	}
 	return string(output)
-}
-
-func (t *TelegramChannel) executeCompact(sessionID string) string {
-	return "⚠️ Compact not yet implemented"
 }

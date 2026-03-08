@@ -927,6 +927,114 @@ func TestTelegramChannel_InitBot_InvalidProxy(t *testing.T) {
 	}
 }
 
+func TestTelegramChannel_RegisteredBotCommands(t *testing.T) {
+	ch, _ := newTestChannel(t, config.TelegramConfig{Token: fakeToken})
+	ch.slashCommands = map[string]telegram.Command{
+		"status": {Name: "status", Description: "Check bot status"},
+		"help":   {Name: "help", Description: "  Show\navailable commands  "},
+		"echo":   {Name: "echo"},
+	}
+
+	commands := ch.registeredBotCommands()
+	if len(commands) != 4 {
+		t.Fatalf("registeredBotCommands len = %d, want 4", len(commands))
+	}
+
+	gotNames := make([]string, 0, len(commands))
+	gotDesc := make(map[string]string, len(commands))
+	for _, cmd := range commands {
+		gotNames = append(gotNames, cmd.Command)
+		gotDesc[cmd.Command] = cmd.Description
+	}
+
+	if strings.Join(gotNames, ",") != "echo,help,new,status" {
+		t.Fatalf("registered command names = %v, want [echo help new status]", gotNames)
+	}
+	if gotDesc["new"] != "Start a fresh session" {
+		t.Fatalf("/new description = %q", gotDesc["new"])
+	}
+	if gotDesc["help"] != "Show available commands" {
+		t.Fatalf("/help description = %q", gotDesc["help"])
+	}
+	if gotDesc["echo"] != "Run /echo" {
+		t.Fatalf("/echo description = %q", gotDesc["echo"])
+	}
+}
+
+func TestTelegramChannel_TelegramRootOverride(t *testing.T) {
+	b := bus.NewMessageBus(10)
+	ch, err := NewTelegramChannel(config.TelegramConfig{Token: fakeToken, RootDir: "/tmp/custom-telegram"}, b)
+	if err != nil {
+		t.Fatalf("NewTelegramChannel error: %v", err)
+	}
+	ch.SetWorkspace("/tmp/workspace")
+	if got := ch.telegramRoot(); got != "/tmp/custom-telegram" {
+		t.Fatalf("telegramRoot = %q, want /tmp/custom-telegram", got)
+	}
+}
+
+func TestTelegramChannel_SyncBotCommands(t *testing.T) {
+	ch, caller := newTestChannel(t, config.TelegramConfig{Token: fakeToken})
+	ch.slashCommands = map[string]telegram.Command{
+		"compact": {Name: "compact", Description: "Compress conversation history"},
+		"status":  {Name: "status", Description: "Check bot status"},
+	}
+
+	if err := ch.syncBotCommands(context.Background()); err != nil {
+		t.Fatalf("syncBotCommands error: %v", err)
+	}
+
+	var payloads []struct {
+		Commands []struct {
+			Command     string `json:"command"`
+			Description string `json:"description"`
+		} `json:"commands"`
+		Scope *struct {
+			Type string `json:"type"`
+		} `json:"scope,omitempty"`
+	}
+
+	for _, call := range caller.calls {
+		if !strings.HasSuffix(call.URL, "/setMyCommands") {
+			continue
+		}
+		var payload struct {
+			Commands []struct {
+				Command     string `json:"command"`
+				Description string `json:"description"`
+			} `json:"commands"`
+			Scope *struct {
+				Type string `json:"type"`
+			} `json:"scope,omitempty"`
+		}
+		if err := json.Unmarshal(call.Data.BodyRaw, &payload); err != nil {
+			t.Fatalf("unmarshal setMyCommands payload: %v", err)
+		}
+		payloads = append(payloads, payload)
+	}
+
+	if len(payloads) != 2 {
+		t.Fatalf("setMyCommands call count = %d, want 2", len(payloads))
+	}
+
+	for i, payload := range payloads {
+		if len(payload.Commands) != 3 {
+			t.Fatalf("payload %d command count = %d, want 3", i, len(payload.Commands))
+		}
+		names := []string{payload.Commands[0].Command, payload.Commands[1].Command, payload.Commands[2].Command}
+		if strings.Join(names, ",") != "compact,new,status" {
+			t.Fatalf("payload %d commands = %v, want [compact new status]", i, names)
+		}
+	}
+
+	if payloads[0].Scope != nil {
+		t.Fatalf("first payload scope = %+v, want nil", payloads[0].Scope)
+	}
+	if payloads[1].Scope == nil || payloads[1].Scope.Type != "all_private_chats" {
+		t.Fatalf("second payload scope = %+v, want all_private_chats", payloads[1].Scope)
+	}
+}
+
 // === Status Card Tests ===
 
 func TestStatusCard_Render_Empty(t *testing.T) {
