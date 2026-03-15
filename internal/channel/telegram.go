@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -21,6 +22,7 @@ import (
 	"github.com/cexll/agentsdk-go/pkg/api"
 	"github.com/cexll/agentsdk-go/pkg/model"
 	"github.com/mymmrac/telego"
+	"github.com/mymmrac/telego/telegoapi"
 	tu "github.com/mymmrac/telego/telegoutil"
 	"github.com/stellarlinkco/myclaw/internal/bus"
 	"github.com/stellarlinkco/myclaw/internal/channel/telegram"
@@ -48,6 +50,37 @@ type TelegramChannel struct {
 	mgBuffer map[string]*mediaGroup
 
 	slashCommands map[string]telegram.Command
+}
+
+func telegramRetryAfter(err error) (time.Duration, bool) {
+	if err == nil {
+		return 0, false
+	}
+	var apiErr *telegoapi.Error
+	if errors.As(err, &apiErr) && apiErr.Parameters != nil && apiErr.ErrorCode == http.StatusTooManyRequests {
+		if apiErr.Parameters.RetryAfter > 0 {
+			return time.Duration(apiErr.Parameters.RetryAfter) * time.Second, true
+		}
+	}
+	const marker = "retry after "
+	text := err.Error()
+	idx := strings.LastIndex(text, marker)
+	if idx < 0 {
+		return 0, false
+	}
+	start := idx + len(marker)
+	end := start
+	for end < len(text) && text[end] >= '0' && text[end] <= '9' {
+		end++
+	}
+	if end == start {
+		return 0, false
+	}
+	secs, convErr := strconv.Atoi(text[start:end])
+	if convErr != nil {
+		return 0, false
+	}
+	return time.Duration(secs) * time.Second, true
 }
 
 func NewTelegramChannel(cfg config.TelegramConfig, b *bus.MessageBus) (*TelegramChannel, error) {
@@ -709,6 +742,7 @@ func (t *TelegramChannel) SendStream(ctx context.Context, chatID string, metadat
 	var contentMsg streamMsg
 	var textBuf strings.Builder
 	var streamErr string
+	var cooldownUntil time.Time
 	const (
 		statusMinGap         = 500 * time.Millisecond
 		contentMinGap        = 1 * time.Second
@@ -722,20 +756,60 @@ func (t *TelegramChannel) SendStream(ctx context.Context, chatID string, metadat
 	var pendingToolInput map[string][]byte // toolUseID -> accumulated JSON
 	var blockToolID string                 // current content_block's tool_use_id
 
+	setCooldown := func(now time.Time, err error) bool {
+		delay, ok := telegramRetryAfter(err)
+		if !ok {
+			return false
+		}
+		until := now.Add(delay)
+		if until.After(cooldownUntil) {
+			cooldownUntil = until
+		}
+		return true
+	}
+	inCooldown := func(now time.Time) bool {
+		return !cooldownUntil.IsZero() && now.Before(cooldownUntil)
+	}
+	waitCooldown := func() error {
+		if cooldownUntil.IsZero() {
+			return nil
+		}
+		delay := time.Until(cooldownUntil)
+		if delay <= 0 {
+			return nil
+		}
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			return nil
+		}
+	}
+
 	upsertMessage := func(msg *streamMsg, text, parseMode string, silent bool, now time.Time) bool {
 		if text == "" {
+			return false
+		}
+		if inCooldown(now) {
+			msg.dirty = true
 			return false
 		}
 		if msg.id == 0 {
 			pid, err := t.sendPlaceholder(numChatID, text, parseMode, silent)
 			if err != nil {
+				setCooldown(now, err)
 				log.Printf("[telegram] stream placeholder failed: %v", err)
+				msg.dirty = true
 				return false
 			}
 			msg.id = pid
 		} else {
 			if err := t.editMessage(numChatID, msg.id, text, parseMode); err != nil {
+				setCooldown(now, err)
 				log.Printf("[telegram] stream edit failed: %v", err)
+				msg.dirty = true
 				return false
 			}
 		}
@@ -760,6 +834,10 @@ func (t *TelegramChannel) SendStream(ctx context.Context, chatID string, metadat
 		if !showCard {
 			return
 		}
+		if inCooldown(now) {
+			statusMsg.dirty = true
+			return
+		}
 		if !statusMsg.lastEdit.IsZero() && now.Sub(statusMsg.lastEdit) < statusMinGap {
 			statusMsg.dirty = true // deferred to ticker
 			return
@@ -769,6 +847,9 @@ func (t *TelegramChannel) SendStream(ctx context.Context, chatID string, metadat
 
 	// Ticker-driven: deferred status + content + heartbeat.
 	tickFlush := func(now time.Time) {
+		if inCooldown(now) {
+			return
+		}
 		if showCard && statusMsg.dirty && (statusMsg.lastEdit.IsZero() || now.Sub(statusMsg.lastEdit) >= statusMinGap) {
 			upsertMessage(&statusMsg, card.Render(), telego.ModeHTML, true, now)
 		}
@@ -872,8 +953,21 @@ func (t *TelegramChannel) SendStream(ctx context.Context, chatID string, metadat
 		}
 	}
 
-	if err := t.Send(bus.OutboundMessage{ChatID: chatID, Content: finalText, Metadata: metadata}); err != nil {
+	finalMsg := bus.OutboundMessage{ChatID: chatID, Content: finalText, Metadata: metadata}
+	if err := waitCooldown(); err != nil {
 		return err
+	}
+	if err := t.Send(finalMsg); err != nil {
+		if setCooldown(time.Now(), err) {
+			if err := waitCooldown(); err != nil {
+				return err
+			}
+			if err := t.Send(finalMsg); err != nil {
+				return err
+			}
+		} else {
+			return err
+		}
 	}
 
 	// Remove intermediate status/content messages only after the final report is visible.
