@@ -50,6 +50,7 @@ type ChannelsConfig struct {
 	Feishu   FeishuConfig   `json:"feishu"`
 	WeCom    WeComConfig    `json:"wecom"`
 	WhatsApp WhatsAppConfig `json:"whatsapp"`
+	WeChat   WeChatConfig   `json:"wechat"`
 	WebUI    WebUIConfig    `json:"webui"`
 }
 
@@ -118,6 +119,12 @@ type WhatsAppConfig struct {
 	Enabled   bool     `json:"enabled"`
 	JID       string   `json:"jid,omitempty"`
 	StorePath string   `json:"storePath,omitempty"`
+	AllowFrom []string `json:"allowFrom,omitempty"`
+}
+
+type WeChatConfig struct {
+	Enabled   bool     `json:"enabled"`
+	CredPath  string   `json:"credPath,omitempty"`
 	AllowFrom []string `json:"allowFrom,omitempty"`
 }
 
@@ -229,6 +236,9 @@ func LoadConfig() (*Config, error) {
 	}
 	if receiveID := os.Getenv("MYCLAW_WECOM_RECEIVE_ID"); receiveID != "" {
 		cfg.Channels.WeCom.ReceiveID = receiveID
+	}
+	if credPath := os.Getenv("MYCLAW_WECHAT_CRED_PATH"); credPath != "" {
+		cfg.Channels.WeChat.CredPath = credPath
 	}
 
 	if cfg.Agent.Workspace == "" {
