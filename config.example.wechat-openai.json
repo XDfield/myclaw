@@ -1,0 +1,61 @@
+{
+  "provider": {
+    "type": "openai",
+    "apiKey": "sk-...",
+    "baseUrl": ""
+  },
+  "agent": {
+    "workspace": "~/.myclaw/workspace",
+    "model": "gpt-4o",
+    "maxTokens": 8192,
+    "temperature": 0.7,
+    "maxToolIterations": 20
+  },
+  "channels": {
+    "wechat": {
+      "enabled": true,
+      "credPath": "",
+      "allowFrom": []
+    },
+    "telegram": {
+      "enabled": false,
+      "token": "",
+      "allowFrom": []
+    },
+    "feishu": {
+      "enabled": false,
+      "appId": "",
+      "appSecret": "",
+      "verificationToken": "",
+      "port": 9876,
+      "allowFrom": []
+    },
+    "wecom": {
+      "enabled": false,
+      "token": "",
+      "encodingAESKey": "",
+      "port": 9886,
+      "allowFrom": []
+    },
+    "whatsapp": {
+      "enabled": false,
+      "allowFrom": []
+    },
+    "webui": {
+      "enabled": false,
+      "allowFrom": []
+    }
+  },
+  "tools": {
+    "execTimeout": 60,
+    "restrictToWorkspace": true
+  },
+  "skills": {
+    "enabled": true,
+    "dir": ""
+  },
+  "gateway": {
+    "host": "0.0.0.0",
+    "port": 18790
+  }
+}
