@@ -318,3 +318,17 @@ func TestLoadConfig_WeComEnvOverrides(t *testing.T) {
 		t.Errorf("wecom receiveId = %q, want wecom-receive-id", cfg.Channels.WeCom.ReceiveID)
 	}
 }
+
+func TestDefaultConfig_SessionDefaults(t *testing.T) {
+	cfg := DefaultConfig()
+
+	if cfg.Session.Reset.Mode != "daily" {
+		t.Errorf("session.reset.mode = %q, want \"daily\"", cfg.Session.Reset.Mode)
+	}
+	if cfg.Session.Reset.AtHour != 4 {
+		t.Errorf("session.reset.atHour = %d, want 4", cfg.Session.Reset.AtHour)
+	}
+	if cfg.Session.Reset.IdleMinutes != 120 {
+		t.Errorf("session.reset.idleMinutes = %d, want 120", cfg.Session.Reset.IdleMinutes)
+	}
+}

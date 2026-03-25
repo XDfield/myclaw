@@ -29,6 +29,7 @@ type Config struct {
 	AutoCompact   AutoCompactConfig   `json:"autoCompact"`
 	TokenTracking TokenTrackingConfig `json:"tokenTracking"`
 	Gateway       GatewayConfig       `json:"gateway"`
+	Session       SessionConfig       `json:"session"`
 }
 
 type AgentConfig struct {
@@ -143,6 +144,16 @@ type TokenTrackingConfig struct {
 	Enabled bool `json:"enabled"`
 }
 
+type SessionConfig struct {
+	Reset SessionResetConfig `json:"reset"`
+}
+
+type SessionResetConfig struct {
+	Mode        string `json:"mode,omitempty"`        // "daily" or "idle", default "daily"
+	AtHour      int    `json:"atHour,omitempty"`      // 0-23, default 4
+	IdleMinutes int    `json:"idleMinutes,omitempty"` // default 120
+}
+
 func DefaultConfig() *Config {
 	home, _ := os.UserHomeDir()
 	return &Config{
@@ -170,6 +181,13 @@ func DefaultConfig() *Config {
 		Gateway: GatewayConfig{
 			Host: DefaultHost,
 			Port: DefaultPort,
+		},
+		Session: SessionConfig{
+			Reset: SessionResetConfig{
+				Mode:        "daily",
+				AtHour:      4,
+				IdleMinutes: 120,
+			},
 		},
 	}
 }
