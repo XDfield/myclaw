@@ -315,6 +315,11 @@ func (g *Gateway) processLoop(ctx context.Context) {
 		case msg := <-g.bus.Inbound:
 			glog.Info().Str("channel", msg.Channel).Str("sender", msg.SenderID).Str("content", truncate(msg.Content, 80)).Msg("inbound message")
 
+			// Prepend current datetime so the agent knows when the message was sent.
+			if g.cfg.Gateway.TimestampPrefixEnabled() {
+				msg.Content = fmt.Sprintf("[%s] %s", time.Now().Format("2006-01-02 15:04:05"), msg.Content)
+			}
+
 			if handled, err := g.handleBuiltinCommand(msg); handled {
 				if err != nil {
 					glog.Error().Err(err).Msg("builtin command error")

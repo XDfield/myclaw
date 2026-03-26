@@ -95,8 +95,9 @@ type ToolsConfig struct {
 }
 
 type GatewayConfig struct {
-	Host string `json:"host"`
-	Port int    `json:"port"`
+	Host            string `json:"host"`
+	Port            int    `json:"port"`
+	TimestampPrefix *bool  `json:"timestampPrefix,omitempty"` // prepend datetime to inbound messages; default true
 }
 
 type SkillsConfig struct {
@@ -198,8 +199,9 @@ func DefaultConfig() *Config {
 			},
 		},
 		Gateway: GatewayConfig{
-			Host: DefaultHost,
-			Port: DefaultPort,
+			Host:            DefaultHost,
+			Port:            DefaultPort,
+			TimestampPrefix: boolPtr(true),
 		},
 		Session: SessionConfig{
 			Reset: SessionResetConfig{
@@ -298,4 +300,15 @@ func SaveConfig(cfg *Config) error {
 	}
 
 	return os.WriteFile(ConfigPath(), data, 0644)
+}
+
+func boolPtr(v bool) *bool { return &v }
+
+// TimestampPrefixEnabled returns whether inbound messages should be
+// prefixed with a datetime stamp. Defaults to true when not explicitly set.
+func (g GatewayConfig) TimestampPrefixEnabled() bool {
+	if g.TimestampPrefix == nil {
+		return true
+	}
+	return *g.TimestampPrefix
 }
