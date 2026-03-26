@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
-	"log"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -15,12 +14,15 @@ import (
 	"github.com/coder/websocket"
 	"github.com/stellarlinkco/myclaw/internal/bus"
 	"github.com/stellarlinkco/myclaw/internal/config"
+	"github.com/stellarlinkco/myclaw/internal/logging"
 )
 
 //go:embed static
 var staticFiles embed.FS
 
 const webUIChannelName = "webui"
+
+var wuilog = logging.Component("webui")
 
 type wsMessage struct {
 	Type    string `json:"type"`
@@ -69,9 +71,9 @@ func (w *WebUIChannel) Start(ctx context.Context) error {
 	}
 
 	go func() {
-		log.Printf("[webui] listening on :%d", w.port)
+		wuilog.Info().Int("port", w.port).Msg("listening")
 		if err := w.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("[webui] server error: %v", err)
+			wuilog.Error().Err(err).Msg("server error")
 		}
 	}()
 
@@ -83,19 +85,19 @@ func (w *WebUIChannel) handleWS(wr http.ResponseWriter, r *http.Request) {
 		InsecureSkipVerify: true,
 	})
 	if err != nil {
-		log.Printf("[webui] websocket accept error: %v", err)
+		wuilog.Error().Err(err).Msg("websocket accept error")
 		return
 	}
 
 	clientID := fmt.Sprintf("webui-%d", w.nextID.Add(1))
 	client := &wsClient{conn: conn, id: clientID}
 	w.clients.Store(clientID, client)
-	log.Printf("[webui] client connected: %s", clientID)
+	wuilog.Info().Str("clientID", clientID).Msg("client connected")
 
 	defer func() {
 		w.clients.Delete(clientID)
 		conn.CloseNow()
-		log.Printf("[webui] client disconnected: %s", clientID)
+		wuilog.Info().Str("clientID", clientID).Msg("client disconnected")
 	}()
 
 	for {
@@ -114,7 +116,7 @@ func (w *WebUIChannel) handleWS(wr http.ResponseWriter, r *http.Request) {
 		}
 
 		if !w.IsAllowed(clientID) {
-			log.Printf("[webui] rejected message from %s", clientID)
+			wuilog.Warn().Str("clientID", clientID).Msg("rejected message")
 			continue
 		}
 
@@ -161,7 +163,7 @@ func (w *WebUIChannel) Stop() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := w.server.Shutdown(ctx); err != nil {
-			log.Printf("[webui] shutdown error: %v", err)
+			wuilog.Error().Err(err).Msg("shutdown error")
 		}
 	}
 	w.clients.Range(func(key, value any) bool {
@@ -169,6 +171,6 @@ func (w *WebUIChannel) Stop() error {
 		c.conn.CloseNow()
 		return true
 	})
-	log.Printf("[webui] stopped")
+	wuilog.Info().Msg("stopped")
 	return nil
 }

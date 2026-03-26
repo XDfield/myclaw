@@ -13,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -24,6 +23,7 @@ import (
 	"github.com/cexll/agentsdk-go/pkg/model"
 	"github.com/stellarlinkco/myclaw/internal/bus"
 	"github.com/stellarlinkco/myclaw/internal/config"
+	"github.com/stellarlinkco/myclaw/internal/logging"
 )
 
 const wecomChannelName = "wecom"
@@ -38,6 +38,8 @@ const (
 	wecomInboundImageTimeout  = 10 * time.Second
 	wecomSendMaxRetries       = 3
 )
+
+var wclog = logging.Component("wecom")
 
 type WeComClient interface {
 	SendMessage(ctx context.Context, responseURL string, msg bus.OutboundMessage) error
@@ -395,9 +397,9 @@ func (w *WeComChannel) Start(ctx context.Context) error {
 	}
 
 	go func() {
-		log.Printf("[wecom] callback server listening on :%d", port)
+		wclog.Info().Int("port", port).Msg("callback server listening")
 		if err := w.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("[wecom] server error: %v", err)
+			wclog.Error().Err(err).Msg("server error")
 		}
 	}()
 
@@ -419,7 +421,7 @@ func (w *WeComChannel) Stop() error {
 	if w.client != nil {
 		w.client.Close()
 	}
-	log.Printf("[wecom] stopped")
+	wclog.Info().Msg("stopped")
 	return nil
 }
 
@@ -643,7 +645,7 @@ func (w *WeComChannel) buildEncryptedReply(timestamp, nonce, receiveID string, p
 func (w *WeComChannel) processDecryptedMessage(plaintext string) {
 	var message weComInboundMessage
 	if err := json.Unmarshal([]byte(plaintext), &message); err != nil {
-		log.Printf("[wecom] unmarshal plaintext json error: %v", err)
+		wclog.Error().Err(err).Msg("unmarshal plaintext json error")
 		return
 	}
 
@@ -653,13 +655,13 @@ func (w *WeComChannel) processDecryptedMessage(plaintext string) {
 	}
 
 	if !w.allowMessageFrom(senderID) {
-		log.Printf("[wecom] rejected message from %s", senderID)
+		wclog.Warn().Str("senderID", senderID).Msg("rejected message")
 		return
 	}
 
 	messageID := strings.TrimSpace(message.MsgID)
 	if messageID != "" && w.msgCache.Seen(messageID) {
-		log.Printf("[wecom] duplicate message dropped: %s", messageID)
+		wclog.Warn().Str("messageID", messageID).Msg("duplicate message dropped")
 		return
 	}
 
@@ -723,7 +725,7 @@ func (w *WeComChannel) extractWeComContentBlocks(message weComInboundMessage) []
 
 	block, err := w.buildWeComImageContentBlock(context.Background(), message)
 	if err != nil {
-		log.Printf("[wecom] process image message warning: %v", err)
+		wclog.Warn().Err(err).Msg("process image message warning")
 	}
 	if block == nil {
 		return nil
@@ -822,7 +824,7 @@ func extractWeComContent(message weComInboundMessage) string {
 		}
 		return strings.TrimSpace(strings.Join(parts, "\n"))
 	default:
-		log.Printf("[wecom] unsupported message type: %s", strings.TrimSpace(message.MsgType))
+		wclog.Warn().Str("msgType", strings.TrimSpace(message.MsgType)).Msg("unsupported message type")
 		return ""
 	}
 }

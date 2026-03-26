@@ -3,7 +3,6 @@ package channel
 import (
 	"context"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
@@ -11,9 +10,12 @@ import (
 	qrterminal "github.com/mdp/qrterminal/v3"
 	"github.com/stellarlinkco/myclaw/internal/bus"
 	"github.com/stellarlinkco/myclaw/internal/config"
+	"github.com/stellarlinkco/myclaw/internal/logging"
 )
 
 const wechatChannelName = "wechat"
+
+var wxlog = logging.Component("wechat")
 
 type WeChatChannel struct {
 	BaseChannel
@@ -25,17 +27,17 @@ func NewWeChatChannel(cfg config.WeChatConfig, b *bus.MessageBus) (*WeChatChanne
 	opts := wechatbot.Options{
 		CredPath: cfg.CredPath,
 		OnQRURL: func(url string) {
-			qrterminal.Generate(url, qrterminal.L, log.Writer())
-			log.Printf("[wechat] scan the QR code above with WeChat to log in")
+			qrterminal.Generate(url, qrterminal.L, logging.Logger)
+			wxlog.Info().Msg("scan the QR code above with WeChat to log in")
 		},
 		OnScanned: func() {
-			log.Printf("[wechat] QR code scanned, waiting for confirmation...")
+			wxlog.Info().Msg("QR code scanned, waiting for confirmation...")
 		},
 		OnExpired: func() {
-			log.Printf("[wechat] session expired, re-login required")
+			wxlog.Warn().Msg("session expired, re-login required")
 		},
 		OnError: func(err error) {
-			log.Printf("[wechat] error: %v", err)
+			wxlog.Error().Err(err).Msg("error")
 		},
 	}
 
@@ -50,11 +52,11 @@ func (w *WeChatChannel) Start(ctx context.Context) error {
 	if _, err := w.bot.Login(ctx, false); err != nil {
 		return fmt.Errorf("wechat login: %w", err)
 	}
-	log.Printf("[wechat] logged in")
+	wxlog.Info().Msg("logged in")
 
 	w.bot.OnMessage(func(msg *wechatbot.IncomingMessage) {
 		if !w.IsAllowed(msg.UserID) {
-			log.Printf("[wechat] rejected message from %s", msg.UserID)
+			wxlog.Warn().Str("senderID", msg.UserID).Msg("rejected message")
 			return
 		}
 
@@ -87,11 +89,11 @@ func (w *WeChatChannel) Start(ctx context.Context) error {
 	ctx, w.cancel = context.WithCancel(ctx)
 	go func() {
 		if err := w.bot.Run(ctx); err != nil && ctx.Err() == nil {
-			log.Printf("[wechat] poll loop exited: %v", err)
+			wxlog.Error().Err(err).Msg("poll loop exited")
 		}
 	}()
 
-	log.Printf("[wechat] started")
+	wxlog.Info().Msg("started")
 	return nil
 }
 
@@ -100,7 +102,7 @@ func (w *WeChatChannel) Stop() error {
 		w.cancel()
 	}
 	w.bot.Stop()
-	log.Printf("[wechat] stopped")
+	wxlog.Info().Msg("stopped")
 	return nil
 }
 

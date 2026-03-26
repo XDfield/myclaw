@@ -2,9 +2,12 @@ package bus
 
 import (
 	"context"
-	"log"
 	"sync"
+
+	"github.com/stellarlinkco/myclaw/internal/logging"
 )
+
+var buslog = logging.Component("bus")
 
 type MessageBus struct {
 	Inbound  chan InboundMessage
@@ -42,7 +45,7 @@ func (b *MessageBus) DispatchOutbound(ctx context.Context) {
 				cb(msg)
 			}
 			if len(cbs) == 0 {
-				log.Printf("[bus] no subscriber for channel %q, dropping message", msg.Channel)
+				buslog.Warn().Str("channel", msg.Channel).Msg("no subscriber, dropping message")
 			}
 		case <-ctx.Done():
 			return

@@ -2,12 +2,15 @@ package heartbeat
 
 import (
 	"context"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/stellarlinkco/myclaw/internal/logging"
 )
+
+var hblog = logging.Component("heartbeat")
 
 type Service struct {
 	workspace   string
@@ -30,14 +33,14 @@ func (s *Service) Start(ctx context.Context) error {
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
 
-	log.Printf("[heartbeat] started, interval=%s", s.interval)
+	hblog.Info().Dur("interval", s.interval).Msg("started")
 
 	for {
 		select {
 		case <-ticker.C:
 			s.tick()
 		case <-ctx.Done():
-			log.Printf("[heartbeat] stopped")
+			hblog.Info().Msg("stopped")
 			return nil
 		}
 	}
@@ -48,7 +51,7 @@ func (s *Service) tick() {
 	data, err := os.ReadFile(hbPath)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			log.Printf("[heartbeat] read error: %v", err)
+			hblog.Error().Err(err).Msg("read error")
 		}
 		return
 	}
@@ -58,23 +61,23 @@ func (s *Service) tick() {
 		return
 	}
 
-	log.Printf("[heartbeat] triggering with prompt (%d chars)", len(content))
+	hblog.Info().Int("chars", len(content)).Msg("triggering")
 
 	if s.onHeartbeat == nil {
-		log.Printf("[heartbeat] no handler set")
+		hblog.Warn().Msg("no handler set")
 		return
 	}
 
 	result, err := s.onHeartbeat(content)
 	if err != nil {
-		log.Printf("[heartbeat] error: %v", err)
+		hblog.Error().Err(err).Msg("heartbeat error")
 		return
 	}
 
 	if strings.Contains(result, "HEARTBEAT_OK") {
-		log.Printf("[heartbeat] nothing to do")
+		hblog.Info().Msg("nothing to do")
 	} else {
-		log.Printf("[heartbeat] result: %s", truncate(result, 200))
+		hblog.Info().Str("result", truncate(result, 200)).Msg("heartbeat result")
 	}
 }
 

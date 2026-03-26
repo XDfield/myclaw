@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -27,7 +26,10 @@ import (
 	"github.com/stellarlinkco/myclaw/internal/bus"
 	"github.com/stellarlinkco/myclaw/internal/channel/telegram"
 	"github.com/stellarlinkco/myclaw/internal/config"
+	"github.com/stellarlinkco/myclaw/internal/logging"
 )
+
+var tglog = logging.Component("telegram")
 
 const telegramChannelName = "telegram"
 
@@ -144,7 +146,7 @@ func (t *TelegramChannel) initBot() error {
 	if err != nil {
 		return fmt.Errorf("telegram getMe: %w", err)
 	}
-	log.Printf("[telegram] authorized as @%s", me.Username)
+	tglog.Info().Str("username", me.Username).Msg("authorized")
 	return nil
 }
 
@@ -172,7 +174,7 @@ func (t *TelegramChannel) Start(ctx context.Context) error {
 		}
 	}()
 
-	log.Printf("[telegram] polling started")
+	tglog.Info().Msg("polling started")
 	return nil
 }
 
@@ -188,7 +190,7 @@ func (t *TelegramChannel) handleMessage(msg *telego.Message) {
 	}
 	senderID := strconv.FormatInt(msg.From.ID, 10)
 	if !t.IsAllowed(senderID) {
-		log.Printf("[telegram] rejected message from %s (%s)", senderID, msg.From.Username)
+		tglog.Warn().Str("senderID", senderID).Str("username", msg.From.Username).Msg("rejected message")
 		return
 	}
 
@@ -349,7 +351,7 @@ func (t *TelegramChannel) extractContent(msg *telego.Message) (string, []model.C
 		photo := msg.Photo[len(msg.Photo)-1]
 		data, err := t.downloadFileData(photo.FileID)
 		if err != nil {
-			log.Printf("[telegram] download photo %s failed: %v", photo.FileID, err)
+			tglog.Error().Err(err).Str("fileID", photo.FileID).Msg("download photo failed")
 		} else {
 			mediaType := http.DetectContentType(data)
 			if mediaType == "application/octet-stream" {
@@ -365,7 +367,7 @@ func (t *TelegramChannel) extractContent(msg *telego.Message) (string, []model.C
 	// Non-image files: save to workspace and pass path reference.
 	if msg.Voice != nil {
 		if path, err := t.saveFile(msg.Voice.FileID, "voice.ogg"); err != nil {
-			log.Printf("[telegram] save voice failed: %v", err)
+			tglog.Error().Err(err).Msg("save voice failed")
 			content = telegram.AppendLine(content, fmt.Sprintf("[Voice message, %ds, download failed]", msg.Voice.Duration))
 		} else {
 			content = telegram.AppendLine(content, "[Voice message saved to: "+path+"]")
@@ -377,7 +379,7 @@ func (t *TelegramChannel) extractContent(msg *telego.Message) (string, []model.C
 			name = "audio.mp3"
 		}
 		if path, err := t.saveFile(msg.Audio.FileID, name); err != nil {
-			log.Printf("[telegram] save audio failed: %v", err)
+			tglog.Error().Err(err).Msg("save audio failed")
 			content = telegram.AppendLine(content, fmt.Sprintf("[Audio: %s, download failed]", name))
 		} else {
 			content = telegram.AppendLine(content, "[Audio file saved to: "+path+"]")
@@ -389,7 +391,7 @@ func (t *TelegramChannel) extractContent(msg *telego.Message) (string, []model.C
 			name = "video.mp4"
 		}
 		if path, err := t.saveFile(msg.Video.FileID, name); err != nil {
-			log.Printf("[telegram] save video failed: %v", err)
+			tglog.Error().Err(err).Msg("save video failed")
 			content = telegram.AppendLine(content, fmt.Sprintf("[Video: %s, download failed]", name))
 		} else {
 			content = telegram.AppendLine(content, "[Video file saved to: "+path+"]")
@@ -404,7 +406,7 @@ func (t *TelegramChannel) extractContent(msg *telego.Message) (string, []model.C
 		if strings.HasPrefix(mediaType, "image/") {
 			data, err := t.downloadFileData(msg.Document.FileID)
 			if err != nil {
-				log.Printf("[telegram] download document %s failed: %v", msg.Document.FileID, err)
+				tglog.Error().Err(err).Str("fileID", msg.Document.FileID).Msg("download document failed")
 				content = telegram.AppendLine(content, fmt.Sprintf("[Image document: %s (%s), download failed]", name, mediaType))
 			} else {
 				blocks = append(blocks, model.ContentBlock{
@@ -415,7 +417,7 @@ func (t *TelegramChannel) extractContent(msg *telego.Message) (string, []model.C
 			}
 		} else {
 			if path, err := t.saveFile(msg.Document.FileID, name); err != nil {
-				log.Printf("[telegram] save document failed: %v", err)
+				tglog.Error().Err(err).Msg("save document failed")
 				info := fmt.Sprintf("[File: %s (%s)", name, mediaType)
 				if msg.Document.FileSize > 0 {
 					info += fmt.Sprintf(", %d bytes", msg.Document.FileSize)
@@ -455,7 +457,7 @@ func (t *TelegramChannel) extractExternalReplyContext(ext *telego.ExternalReplyI
 			photo := ext.Photo[len(ext.Photo)-1]
 			data, err := t.downloadFileData(photo.FileID)
 			if err != nil {
-				log.Printf("[telegram] download external reply photo failed: %v", err)
+				tglog.Error().Err(err).Msg("download external reply photo failed")
 				b.WriteString("\n[Photo, download failed]")
 			} else {
 				mediaType := http.DetectContentType(data)
@@ -513,7 +515,7 @@ func (t *TelegramChannel) saveFile(fileID, name string) (string, error) {
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		return "", fmt.Errorf("write file: %w", err)
 	}
-	log.Printf("[telegram] saved file to %s (%d bytes)", path, len(data))
+	tglog.Info().Str("path", path).Int("bytes", len(data)).Msg("saved file")
 	return path, nil
 }
 
@@ -564,7 +566,7 @@ func (t *TelegramChannel) Stop() error {
 	if t.cancel != nil {
 		t.cancel()
 	}
-	log.Printf("[telegram] stopped")
+	tglog.Info().Msg("stopped")
 	return nil
 }
 
@@ -595,7 +597,7 @@ func (t *TelegramChannel) sendReaction(chatID int64, messageID int, emoji string
 		Reaction:  []telego.ReactionType{tu.ReactionEmoji(emoji)},
 	})
 	if err != nil {
-		log.Printf("[telegram] sendReaction failed: %v", err)
+		tglog.Error().Err(err).Msg("sendReaction failed")
 	}
 }
 
@@ -606,7 +608,7 @@ func (t *TelegramChannel) sendTyping(chatID int64) {
 	}
 	err := t.bot.SendChatAction(context.Background(), tu.ChatAction(tu.ID(chatID), telego.ChatActionTyping))
 	if err != nil {
-		log.Printf("[telegram] sendTyping failed: %v", err)
+		tglog.Error().Err(err).Msg("sendTyping failed")
 	}
 }
 
@@ -671,7 +673,7 @@ func (t *TelegramChannel) Send(msg bus.OutboundMessage) error {
 		if pid, ok := placeholderID.(int); ok && pid != 0 {
 			content := telegram.ToTelegramHTML(msg.Content)
 			if err := t.editMessage(chatID, pid, content, telego.ModeHTML); err != nil {
-				log.Printf("[telegram] edit placeholder failed: %v", err)
+				tglog.Error().Err(err).Msg("edit placeholder failed")
 			} else {
 				return nil
 			}
@@ -800,7 +802,7 @@ func (t *TelegramChannel) SendStream(ctx context.Context, chatID string, metadat
 			pid, err := t.sendPlaceholder(numChatID, text, parseMode, silent)
 			if err != nil {
 				setCooldown(now, err)
-				log.Printf("[telegram] stream placeholder failed: %v", err)
+				tglog.Error().Err(err).Msg("stream placeholder failed")
 				msg.dirty = true
 				return false
 			}
@@ -808,7 +810,7 @@ func (t *TelegramChannel) SendStream(ctx context.Context, chatID string, metadat
 		} else {
 			if err := t.editMessage(numChatID, msg.id, text, parseMode); err != nil {
 				setCooldown(now, err)
-				log.Printf("[telegram] stream edit failed: %v", err)
+				tglog.Error().Err(err).Msg("stream edit failed")
 				msg.dirty = true
 				return false
 			}
@@ -875,7 +877,7 @@ func (t *TelegramChannel) SendStream(ctx context.Context, chatID string, metadat
 				continue
 			}
 			if t.feedback == "debug" && event.Type != api.EventContentBlockDelta && event.Type != api.EventContentBlockStop && event.Type != api.EventPing {
-				log.Printf("[telegram] stream event: type=%s name=%s", event.Type, event.Name)
+				tglog.Debug().Str("type", string(event.Type)).Str("name", event.Name).Msg("stream event")
 			}
 			switch event.Type {
 			case api.EventIterationStart:
@@ -937,7 +939,7 @@ func (t *TelegramChannel) SendStream(ctx context.Context, chatID string, metadat
 
 			case api.EventError:
 				streamErr = strings.TrimSpace(fmt.Sprintf("%v", event.Output))
-				log.Printf("[telegram] stream error: %s", streamErr)
+				tglog.Error().Str("error", streamErr).Msg("stream error")
 				tryUpdateStatus(time.Now())
 			}
 		}
@@ -973,12 +975,12 @@ func (t *TelegramChannel) SendStream(ctx context.Context, chatID string, metadat
 	// Remove intermediate status/content messages only after the final report is visible.
 	if statusMsg.id != 0 {
 		if err := t.deleteMessage(numChatID, statusMsg.id); err != nil {
-			log.Printf("[telegram] delete status message failed: %v", err)
+			tglog.Error().Err(err).Msg("delete status message failed")
 		}
 	}
 	if contentMsg.id != 0 {
 		if err := t.deleteMessage(numChatID, contentMsg.id); err != nil {
-			log.Printf("[telegram] delete content message failed: %v", err)
+			tglog.Error().Err(err).Msg("delete content message failed")
 		}
 	}
 
@@ -990,23 +992,23 @@ func (t *TelegramChannel) loadSlashCommands() {
 	t.slashCommands = make(map[string]telegram.Command)
 	root := t.telegramRoot()
 	if root == "" {
-		log.Printf("[telegram] skip slash command load: telegram root is not configured")
+		tglog.Info().Msg("skip slash command load: telegram root is not configured")
 		return
 	}
 	dir := filepath.Join(root, "slashes")
 	cmds, err := telegram.LoadCommands(dir)
 	if err != nil {
-		log.Printf("[telegram] load slash commands: %v", err)
+		tglog.Error().Err(err).Msg("load slash commands")
 		return
 	}
 	for _, cmd := range cmds {
 		t.slashCommands[cmd.Name] = cmd
 	}
 	if len(t.slashCommands) > 0 {
-		log.Printf("[telegram] loaded %d slash commands from %s", len(t.slashCommands), dir)
+		tglog.Info().Int("count", len(t.slashCommands)).Str("dir", dir).Msg("loaded slash commands")
 		return
 	}
-	log.Printf("[telegram] no slash commands found in %s", dir)
+	tglog.Info().Str("dir", dir).Msg("no slash commands found")
 }
 
 func (t *TelegramChannel) syncBotCommands(ctx context.Context) error {
@@ -1024,7 +1026,7 @@ func (t *TelegramChannel) syncBotCommands(ctx context.Context) error {
 		return err
 	}
 
-	log.Printf("[telegram] registered %d bot commands", len(commands))
+	tglog.Info().Int("count", len(commands)).Msg("registered bot commands")
 	return nil
 }
 

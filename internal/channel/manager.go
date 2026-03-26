@@ -3,12 +3,14 @@ package channel
 import (
 	"context"
 	"fmt"
-	"log"
 	"sync"
 
 	"github.com/stellarlinkco/myclaw/internal/bus"
 	"github.com/stellarlinkco/myclaw/internal/config"
+	"github.com/stellarlinkco/myclaw/internal/logging"
 )
+
+var chlog = logging.Component("channel-mgr")
 
 type ChannelManager struct {
 	channels map[string]Channel
@@ -29,7 +31,7 @@ func NewChannelManager(cfg config.ChannelsConfig, b *bus.MessageBus) (*ChannelMa
 		m.channels[ch.Name()] = ch
 		b.SubscribeOutbound(ch.Name(), func(msg bus.OutboundMessage) {
 			if err := ch.Send(msg); err != nil {
-				log.Printf("[channel-mgr] send to %s failed: %v", ch.Name(), err)
+				chlog.Error().Err(err).Str("channel", ch.Name()).Msg("send failed")
 			}
 		})
 	}
@@ -42,7 +44,7 @@ func NewChannelManager(cfg config.ChannelsConfig, b *bus.MessageBus) (*ChannelMa
 		m.channels[ch.Name()] = ch
 		b.SubscribeOutbound(ch.Name(), func(msg bus.OutboundMessage) {
 			if err := ch.Send(msg); err != nil {
-				log.Printf("[channel-mgr] send to %s failed: %v", ch.Name(), err)
+				chlog.Error().Err(err).Str("channel", ch.Name()).Msg("send failed")
 			}
 		})
 	}
@@ -55,7 +57,7 @@ func NewChannelManager(cfg config.ChannelsConfig, b *bus.MessageBus) (*ChannelMa
 		m.channels[ch.Name()] = ch
 		b.SubscribeOutbound(ch.Name(), func(msg bus.OutboundMessage) {
 			if err := ch.Send(msg); err != nil {
-				log.Printf("[channel-mgr] send to %s failed: %v", ch.Name(), err)
+				chlog.Error().Err(err).Str("channel", ch.Name()).Msg("send failed")
 			}
 		})
 	}
@@ -68,7 +70,7 @@ func NewChannelManager(cfg config.ChannelsConfig, b *bus.MessageBus) (*ChannelMa
 		m.channels[ch.Name()] = ch
 		b.SubscribeOutbound(ch.Name(), func(msg bus.OutboundMessage) {
 			if err := ch.Send(msg); err != nil {
-				log.Printf("[channel-mgr] send to %s failed: %v", ch.Name(), err)
+				chlog.Error().Err(err).Str("channel", ch.Name()).Msg("send failed")
 			}
 		})
 	}
@@ -81,7 +83,7 @@ func NewChannelManager(cfg config.ChannelsConfig, b *bus.MessageBus) (*ChannelMa
 		m.channels[ch.Name()] = ch
 		b.SubscribeOutbound(ch.Name(), func(msg bus.OutboundMessage) {
 			if err := ch.Send(msg); err != nil {
-				log.Printf("[channel-mgr] send to %s failed: %v", ch.Name(), err)
+				chlog.Error().Err(err).Str("channel", ch.Name()).Msg("send failed")
 			}
 		})
 	}
@@ -103,7 +105,7 @@ func NewChannelManagerWithGateway(cfg config.ChannelsConfig, gwCfg config.Gatewa
 		m.channels[ch.Name()] = ch
 		b.SubscribeOutbound(ch.Name(), func(msg bus.OutboundMessage) {
 			if err := ch.Send(msg); err != nil {
-				log.Printf("[channel-mgr] send to %s failed: %v", ch.Name(), err)
+				chlog.Error().Err(err).Str("channel", ch.Name()).Msg("send failed")
 			}
 		})
 	}
@@ -119,7 +121,7 @@ func (m *ChannelManager) StartAll(ctx context.Context) error {
 		wg.Add(1)
 		go func(name string, ch Channel) {
 			defer wg.Done()
-			log.Printf("[channel-mgr] starting %s", name)
+			chlog.Info().Str("channel", name).Msg("starting")
 			if err := ch.Start(ctx); err != nil {
 				errCh <- fmt.Errorf("%s: %w", name, err)
 			}
@@ -137,9 +139,9 @@ func (m *ChannelManager) StartAll(ctx context.Context) error {
 
 func (m *ChannelManager) StopAll() error {
 	for name, ch := range m.channels {
-		log.Printf("[channel-mgr] stopping %s", name)
+		chlog.Info().Str("channel", name).Msg("stopping")
 		if err := ch.Stop(); err != nil {
-			log.Printf("[channel-mgr] error stopping %s: %v", name, err)
+			chlog.Error().Err(err).Str("channel", name).Msg("error stopping")
 		}
 	}
 	return nil

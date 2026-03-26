@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,6 +14,7 @@ import (
 	qrterminal "github.com/mdp/qrterminal/v3"
 	"github.com/stellarlinkco/myclaw/internal/bus"
 	"github.com/stellarlinkco/myclaw/internal/config"
+	"github.com/stellarlinkco/myclaw/internal/logging"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store/sqlstore"
@@ -32,6 +32,8 @@ const (
 	whatsappInboundImageTimeout = 20 * time.Second
 	whatsappSendTimeout         = 30 * time.Second
 )
+
+var walog = logging.Component("whatsapp")
 
 type WhatsAppChannel struct {
 	BaseChannel
@@ -107,7 +109,7 @@ func (w *WhatsAppChannel) Start(ctx context.Context) error {
 		w.client.Disconnect()
 	}()
 
-	log.Printf("[whatsapp] connected")
+	walog.Info().Msg("connected")
 	return nil
 }
 
@@ -131,7 +133,7 @@ func (w *WhatsAppChannel) Stop() error {
 		w.storeContainer = nil
 	}
 
-	log.Printf("[whatsapp] stopped")
+	walog.Info().Msg("stopped")
 	return nil
 }
 
@@ -183,13 +185,13 @@ func (w *WhatsAppChannel) consumeQR(ctx context.Context, qrChan <-chan whatsmeow
 
 			switch evt.Event {
 			case whatsmeow.QRChannelEventCode:
-				log.Printf("[whatsapp] scan the QR code below to login")
+				walog.Info().Msg("scan the QR code below to login")
 				qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
 			default:
 				if evt.Error != nil {
-					log.Printf("[whatsapp] login event=%s error=%v", evt.Event, evt.Error)
+					walog.Info().Str("event", string(evt.Event)).Err(evt.Error).Msg("login event")
 				} else {
-					log.Printf("[whatsapp] login event=%s", evt.Event)
+					walog.Info().Str("event", string(evt.Event)).Msg("login event")
 				}
 			}
 		}
@@ -211,7 +213,7 @@ func (w *WhatsAppChannel) handleMessage(evt *events.Message) {
 	rawSender := evt.Info.Sender.String()
 	sender := evt.Info.Sender.ToNonAD().String()
 	if !w.IsAllowed(sender) && !w.IsAllowed(rawSender) {
-		log.Printf("[whatsapp] rejected message from %s", sender)
+		walog.Warn().Str("senderID", sender).Msg("rejected message")
 		return
 	}
 
@@ -253,7 +255,7 @@ func (w *WhatsAppChannel) extractContent(evt *events.Message) (string, []model.C
 		data, err := w.client.Download(ctx, image)
 		cancel()
 		if err != nil {
-			log.Printf("[whatsapp] download image failed: %v", err)
+			walog.Warn().Err(err).Msg("download image failed")
 		} else if len(data) > 0 {
 			mediaType := strings.TrimSpace(image.GetMimetype())
 			if mediaType == "" {

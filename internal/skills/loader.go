@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,8 +12,11 @@ import (
 
 	"github.com/cexll/agentsdk-go/pkg/api"
 	runtimeskills "github.com/cexll/agentsdk-go/pkg/runtime/skills"
+	"github.com/stellarlinkco/myclaw/internal/logging"
 	"gopkg.in/yaml.v3"
 )
+
+var sklog = logging.Component("skills")
 
 const skillFileName = "SKILL.md"
 
@@ -90,7 +92,7 @@ func parseSkillFile(path string) (api.SkillRegistration, bool, error) {
 	meta, body, err := parseFrontmatter(content)
 	if err != nil {
 		if errors.Is(err, errInvalidSkillYAML) {
-			log.Printf("[skills] warning: skip invalid YAML skill %s: %v", path, err)
+			sklog.Warn().Err(err).Str("path", path).Msg("skip invalid YAML skill")
 			return api.SkillRegistration{}, true, nil
 		}
 		return api.SkillRegistration{}, false, fmt.Errorf("parse skill %q: %w", path, err)

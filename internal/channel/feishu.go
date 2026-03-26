@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -16,6 +15,7 @@ import (
 	"github.com/cexll/agentsdk-go/pkg/model"
 	"github.com/stellarlinkco/myclaw/internal/bus"
 	"github.com/stellarlinkco/myclaw/internal/config"
+	"github.com/stellarlinkco/myclaw/internal/logging"
 )
 
 const feishuChannelName = "feishu"
@@ -24,6 +24,8 @@ const (
 	feishuInboundImageMaxBytes = 10 << 20 // 10MB
 	feishuInboundImageTimeout  = 10 * time.Second
 )
+
+var fslog = logging.Component("feishu")
 
 type FeishuImageDownloader func(ctx context.Context, tenantAccessToken, imageKey string) (string, string, error)
 
@@ -196,9 +198,9 @@ func (f *FeishuChannel) Start(ctx context.Context) error {
 	}
 
 	go func() {
-		log.Printf("[feishu] webhook server listening on :%d", port)
+		fslog.Info().Int("port", port).Msg("webhook server listening")
 		if err := f.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("[feishu] server error: %v", err)
+			fslog.Error().Err(err).Msg("server error")
 		}
 	}()
 
@@ -217,7 +219,7 @@ func (f *FeishuChannel) Stop() error {
 	if f.server != nil {
 		f.server.Close()
 	}
-	log.Printf("[feishu] stopped")
+	fslog.Info().Msg("stopped")
 	return nil
 }
 
@@ -288,7 +290,7 @@ func (f *FeishuChannel) handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	senderID := event.Event.Sender.SenderID.OpenID
 	if !f.IsAllowed(senderID) {
-		log.Printf("[feishu] rejected message from %s", senderID)
+		fslog.Warn().Str("senderID", senderID).Msg("rejected message")
 		return
 	}
 
@@ -299,7 +301,7 @@ func (f *FeishuChannel) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		event.Event.Message.Content,
 	)
 	if err != nil {
-		log.Printf("[feishu] parse message error: %v", err)
+		fslog.Error().Err(err).Msg("parse message error")
 		return
 	}
 	if content == "" && len(contentBlocks) == 0 {
@@ -356,7 +358,7 @@ func (f *FeishuChannel) parseFeishuInboundMessage(ctx context.Context, messageTy
 
 		block, err := f.buildFeishuImageContentBlock(ctx, imageKey)
 		if err != nil {
-			log.Printf("[feishu] image download warning: %v", err)
+			fslog.Warn().Err(err).Msg("image download warning")
 		}
 		if block == nil {
 			return "[image]", nil, map[string]any{"image_key": imageKey}, nil

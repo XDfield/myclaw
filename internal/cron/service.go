@@ -4,14 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
 	rcron "github.com/robfig/cron/v3"
+	"github.com/stellarlinkco/myclaw/internal/logging"
 )
+
+var cronlog = logging.Component("cron")
 
 type Service struct {
 	storePath string
@@ -31,7 +33,7 @@ func NewService(storePath string) *Service {
 
 func (s *Service) Start(ctx context.Context) error {
 	if err := s.load(); err != nil {
-		log.Printf("[cron] warning: failed to load jobs: %v", err)
+		cronlog.Warn().Err(err).Msg("failed to load jobs")
 	}
 
 	s.cron = rcron.New(rcron.WithSeconds())
@@ -45,7 +47,7 @@ func (s *Service) Start(ctx context.Context) error {
 	s.mu.Unlock()
 
 	s.cron.Start()
-	log.Printf("[cron] started with %d jobs", len(s.jobs))
+	cronlog.Info().Int("jobs", len(s.jobs)).Msg("started")
 
 	// Handle "every" and "at" jobs in a separate goroutine
 	go s.tickLoop(ctx)
@@ -64,17 +66,17 @@ func (s *Service) registerJob(job *CronJob) {
 		s.executeJob(jobCopy)
 	})
 	if err != nil {
-		log.Printf("[cron] failed to register job %s (%s): %v", job.Name, job.Schedule.Expr, err)
+		cronlog.Error().Err(err).Str("job", job.Name).Str("schedule", job.Schedule.Expr).Msg("failed to register job")
 		return
 	}
 	s.entryMap[job.ID] = id
 }
 
 func (s *Service) executeJob(job CronJob) {
-	log.Printf("[cron] executing job %s (%s)", job.Name, job.ID)
+	cronlog.Info().Str("job", job.Name).Str("id", job.ID).Msg("executing job")
 
 	if s.OnJob == nil {
-		log.Printf("[cron] no OnJob handler set")
+		cronlog.Warn().Msg("no OnJob handler set")
 		return
 	}
 
@@ -89,11 +91,11 @@ func (s *Service) executeJob(job CronJob) {
 			if err != nil {
 				s.jobs[i].State.LastStatus = "error"
 				s.jobs[i].State.LastError = err.Error()
-				log.Printf("[cron] job %s error: %v", job.Name, err)
+				cronlog.Error().Err(err).Str("job", job.Name).Msg("job error")
 			} else {
 				s.jobs[i].State.LastStatus = "ok"
 				s.jobs[i].State.LastError = ""
-				log.Printf("[cron] job %s result: %s", job.Name, truncate(result, 100))
+				cronlog.Info().Str("job", job.Name).Str("result", truncate(result, 100)).Msg("job completed")
 			}
 
 			if s.jobs[i].DeleteAfterRun {
@@ -152,7 +154,7 @@ func (s *Service) Stop() {
 	if s.cron != nil {
 		s.cron.Stop()
 	}
-	log.Printf("[cron] stopped")
+	cronlog.Info().Msg("stopped")
 }
 
 func (s *Service) AddJob(name string, schedule Schedule, payload Payload) (*CronJob, error) {

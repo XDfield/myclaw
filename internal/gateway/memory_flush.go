@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"context"
-	"log"
 	"strings"
 	"time"
 )
@@ -55,7 +54,7 @@ func (g *Gateway) shouldFlushMemory(chatSessionKey string) bool {
 }
 
 func (g *Gateway) runMemoryFlush(ctx context.Context, chatSessionKey, sessionID string) {
-	log.Printf("[gateway] running pre-compaction memory flush for %s", chatSessionKey)
+	glog.Info().Str("session", chatSessionKey).Msg("running pre-compaction memory flush")
 	prompt := g.cfg.AutoCompact.MemoryFlush.Prompt
 	if prompt == "" {
 		prompt = defaultMemoryFlushPrompt
@@ -63,9 +62,9 @@ func (g *Gateway) runMemoryFlush(ctx context.Context, chatSessionKey, sessionID 
 	prompt = strings.ReplaceAll(prompt, "YYYY-MM-DD", time.Now().Format("2006-01-02"))
 	_, err := g.runAgent(ctx, prompt, sessionID, nil)
 	if err != nil {
-		log.Printf("[gateway] memory flush error: %v", err)
+		glog.Error().Err(err).Msg("memory flush error")
 		return
 	}
 	_ = g.sessions.MarkMemoryFlushed(chatSessionKey)
-	log.Printf("[gateway] memory flush completed for %s", chatSessionKey)
+	glog.Info().Str("session", chatSessionKey).Msg("memory flush completed")
 }

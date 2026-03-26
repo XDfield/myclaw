@@ -3,7 +3,6 @@ package gateway
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -19,11 +18,14 @@ import (
 	"github.com/stellarlinkco/myclaw/internal/config"
 	"github.com/stellarlinkco/myclaw/internal/cron"
 	"github.com/stellarlinkco/myclaw/internal/heartbeat"
+	"github.com/stellarlinkco/myclaw/internal/logging"
 	"github.com/stellarlinkco/myclaw/internal/memory"
 	"github.com/stellarlinkco/myclaw/internal/runtimecmd"
 	"github.com/stellarlinkco/myclaw/internal/session"
 	"github.com/stellarlinkco/myclaw/internal/skills"
 )
+
+var glog = logging.Component("gateway")
 
 // Runtime interface for agent runtime (allows mocking in tests)
 type Runtime interface {
@@ -147,7 +149,7 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Gateway, error) {
 		}
 		skillRegs, err := skills.LoadSkills(skillDir)
 		if err != nil {
-			log.Printf("[gateway] skills load warning: %v", err)
+			glog.Warn().Err(err).Msg("skills load warning")
 		}
 		g.skillRegs = skillRegs
 	}
@@ -274,21 +276,21 @@ func (g *Gateway) Run(ctx context.Context) error {
 	if err := g.channels.StartAll(ctx); err != nil {
 		return fmt.Errorf("start channels: %w", err)
 	}
-	log.Printf("[gateway] channels started: %v", g.channels.EnabledChannels())
+	glog.Info().Msgf("channels started: %v", g.channels.EnabledChannels())
 
 	if err := g.cron.Start(ctx); err != nil {
-		log.Printf("[gateway] cron start warning: %v", err)
+		glog.Warn().Err(err).Msg("cron start warning")
 	}
 
 	go func() {
 		if err := g.hb.Start(ctx); err != nil {
-			log.Printf("[gateway] heartbeat error: %v", err)
+			glog.Error().Err(err).Msg("heartbeat error")
 		}
 	}()
 
 	go g.processLoop(ctx)
 
-	log.Printf("[gateway] running on %s:%d", g.cfg.Gateway.Host, g.cfg.Gateway.Port)
+	glog.Info().Str("host", g.cfg.Gateway.Host).Int("port", g.cfg.Gateway.Port).Msg("gateway running")
 
 	// Use injected signal channel for testing, or create default
 	sigCh := g.signalChan
@@ -298,7 +300,7 @@ func (g *Gateway) Run(ctx context.Context) error {
 	}
 	<-sigCh
 
-	log.Printf("[gateway] shutting down...")
+	glog.Info().Msg("shutting down")
 	return g.Shutdown()
 }
 
@@ -311,11 +313,11 @@ func (g *Gateway) processLoop(ctx context.Context) {
 	for {
 		select {
 		case msg := <-g.bus.Inbound:
-			log.Printf("[gateway] inbound from %s/%s: %s", msg.Channel, msg.SenderID, truncate(msg.Content, 80))
+			glog.Info().Str("channel", msg.Channel).Str("sender", msg.SenderID).Str("content", truncate(msg.Content, 80)).Msg("inbound message")
 
 			if handled, err := g.handleBuiltinCommand(msg); handled {
 				if err != nil {
-					log.Printf("[gateway] builtin command error: %v", err)
+					glog.Error().Err(err).Msg("builtin command error")
 					g.bus.Outbound <- bus.OutboundMessage{
 						Channel: msg.Channel,
 						ChatID:  msg.ChatID,
@@ -347,11 +349,11 @@ func (g *Gateway) processLoop(ctx context.Context) {
 				}
 				resolved, rotated, err := g.sessions.CheckAndRotateIfStale(msg.SessionKey(), policy)
 				if err != nil {
-					log.Printf("[gateway] session freshness check error: %v", err)
+					glog.Error().Err(err).Msg("session freshness check error")
 					resolved = g.sessions.Resolve(msg.SessionKey(), msg.SessionKey())
 				}
 				if rotated {
-					log.Printf("[gateway] session auto-rotated for %s", msg.SessionKey())
+					glog.Info().Str("sessionKey", msg.SessionKey()).Msg("session auto-rotated")
 				}
 				sessionKey = resolved
 				_ = g.sessions.Touch(msg.SessionKey())
@@ -376,7 +378,7 @@ func (g *Gateway) processLoop(ctx context.Context) {
 				if ss, ok := ch.(StreamSender); ok {
 					events, err := g.runAgentStream(msgCtx, msg.Content, sessionKey, msg.ContentBlocks)
 					if err != nil {
-						log.Printf("[gateway] agent stream error: %v", err)
+						glog.Error().Err(err).Msg("agent stream error")
 						g.bus.Outbound <- bus.OutboundMessage{
 							Channel: msg.Channel,
 							ChatID:  msg.ChatID,
@@ -385,7 +387,7 @@ func (g *Gateway) processLoop(ctx context.Context) {
 						continue
 					}
 					if err := ss.SendStream(ctx, msg.ChatID, msg.Metadata, events); err != nil {
-						log.Printf("[gateway] SendStream error: %v", err)
+						glog.Error().Err(err).Msg("SendStream error")
 					}
 					continue
 				}
@@ -418,21 +420,21 @@ func (g *Gateway) processLoop(ctx context.Context) {
 				if attempt == maxRetries {
 					break
 				}
-				log.Printf("[gateway] context overflow (attempt %d/%d), compacting...", attempt+1, maxRetries)
+				glog.Warn().Int("attempt", attempt+1).Int("maxRetries", maxRetries).Msg("context overflow, compacting")
 				if g.sessions == nil {
 					break
 				}
 				_, compactErr := g.compactAndRotate(msgCtx, msg.SessionKey(), sessionKey)
 				if compactErr != nil {
-					log.Printf("[gateway] overflow compact failed: %v", compactErr)
+					glog.Error().Err(compactErr).Msg("overflow compact failed")
 					break
 				}
 				sessionKey = g.sessions.Resolve(msg.SessionKey(), msg.SessionKey())
-				log.Printf("[gateway] overflow compact succeeded, retrying with new session")
+				glog.Info().Msg("overflow compact succeeded, retrying with new session")
 			}
 
 			if lastErr != nil {
-				log.Printf("[gateway] agent error: %v", lastErr)
+				glog.Error().Err(lastErr).Msg("agent error")
 				g.bus.Outbound <- bus.OutboundMessage{
 					Channel: msg.Channel,
 					ChatID:  msg.ChatID,
@@ -455,7 +457,7 @@ func (g *Gateway) processLoop(ctx context.Context) {
 			}
 			if postResult, handled, postErr := g.handlePostResponse(msg.SessionKey(), resp); handled || postErr != nil {
 				if postErr != nil {
-					log.Printf("[gateway] post action error: %v", postErr)
+					glog.Error().Err(postErr).Msg("post action error")
 					result = "Sorry, I encountered an error processing your command."
 				} else {
 					result = postResult
@@ -502,7 +504,7 @@ func (g *Gateway) Shutdown() error {
 	if g.runtime != nil {
 		g.runtime.Close()
 	}
-	log.Printf("[gateway] shutdown complete")
+	glog.Info().Msg("shutdown complete")
 	return nil
 }
 
