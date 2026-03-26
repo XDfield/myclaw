@@ -3,13 +3,14 @@ package skills
 import (
 	"bytes"
 	"context"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	runtimeskills "github.com/cexll/agentsdk-go/pkg/runtime/skills"
+	"github.com/rs/zerolog"
+	"github.com/stellarlinkco/myclaw/internal/logging"
 )
 
 func TestLoadSkills_LoadSingleSkill(t *testing.T) {
@@ -223,17 +224,16 @@ func TestLoadSkills_InvalidYAML(t *testing.T) {
 	invalidSkillPath := writeTestSkillFile(t, root, "broken", "---\nname: broken\ndescription: invalid yaml\nkeywords: [search, web\n---\n# Broken\n")
 	writeTestSkillFile(t, root, "ok", "---\nname: ok\ndescription: valid\nkeywords: [ok]\n---\n# OK\n")
 
+	// Redirect zerolog output to a buffer to capture warning messages.
 	var logBuf bytes.Buffer
-	originalWriter := log.Writer()
-	originalFlags := log.Flags()
-	originalPrefix := log.Prefix()
-	log.SetOutput(&logBuf)
-	log.SetFlags(0)
-	log.SetPrefix("")
+	origLogger := sklog
+	sklog = zerolog.New(&logBuf).With().Str("component", "skills").Logger()
+	// Also update the package-level logging.Logger for any fallback paths.
+	origGlobal := logging.Logger
+	logging.Logger = zerolog.New(&logBuf)
 	t.Cleanup(func() {
-		log.SetOutput(originalWriter)
-		log.SetFlags(originalFlags)
-		log.SetPrefix(originalPrefix)
+		sklog = origLogger
+		logging.Logger = origGlobal
 	})
 
 	registrations, err := LoadSkills(root)
@@ -251,7 +251,9 @@ func TestLoadSkills_InvalidYAML(t *testing.T) {
 	if !strings.Contains(output, "skip invalid YAML skill") {
 		t.Fatalf("expected warning log, got: %q", output)
 	}
-	if !strings.Contains(output, invalidSkillPath) {
+	// The path in JSON output has escaped backslashes, so normalize for comparison.
+	escapedPath := strings.ReplaceAll(invalidSkillPath, `\`, `\\`)
+	if !strings.Contains(output, invalidSkillPath) && !strings.Contains(output, escapedPath) {
 		t.Fatalf("expected warning log to include invalid skill path %q, got: %q", invalidSkillPath, output)
 	}
 }
