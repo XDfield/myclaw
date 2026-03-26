@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/stellarlinkco/myclaw/internal/logging"
 )
 
 const (
@@ -30,6 +32,7 @@ type Config struct {
 	TokenTracking TokenTrackingConfig `json:"tokenTracking"`
 	Gateway       GatewayConfig       `json:"gateway"`
 	Session       SessionConfig       `json:"session"`
+	Log           logging.LogConfig   `json:"log"`
 }
 
 type AgentConfig struct {
@@ -205,6 +208,7 @@ func DefaultConfig() *Config {
 				IdleMinutes: 120,
 			},
 		},
+		Log: logging.DefaultLogConfig(),
 	}
 }
 
