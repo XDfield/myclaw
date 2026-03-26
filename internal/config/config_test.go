@@ -332,3 +332,20 @@ func TestDefaultConfig_SessionDefaults(t *testing.T) {
 		t.Errorf("session.reset.idleMinutes = %d, want 120", cfg.Session.Reset.IdleMinutes)
 	}
 }
+
+func TestDefaultConfig_AutoCompactDefaults(t *testing.T) {
+	cfg := DefaultConfig()
+
+	if !cfg.AutoCompact.OverflowRetry {
+		t.Error("autoCompact.overflowRetry should be true by default")
+	}
+	if cfg.AutoCompact.MaxOverflowRetry != 3 {
+		t.Errorf("autoCompact.maxOverflowRetry = %d, want 3", cfg.AutoCompact.MaxOverflowRetry)
+	}
+	if !cfg.AutoCompact.MemoryFlush.Enabled {
+		t.Error("autoCompact.memoryFlush.enabled should be true by default")
+	}
+	if cfg.AutoCompact.MemoryFlush.SoftThresholdTokens != 4000 {
+		t.Errorf("autoCompact.memoryFlush.softThresholdTokens = %d, want 4000", cfg.AutoCompact.MemoryFlush.SoftThresholdTokens)
+	}
+}

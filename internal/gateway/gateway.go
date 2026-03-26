@@ -339,7 +339,22 @@ func (g *Gateway) processLoop(ctx context.Context) {
 			if shouldIsolateSession(msg.Metadata) {
 				sessionKey = isolatedSessionKey(msg)
 			} else if g.sessions != nil {
-				sessionKey = g.sessions.Resolve(sessionKey, sessionKey)
+				// Time-based auto-reset
+				policy := session.ResetPolicy{
+					Mode:        g.cfg.Session.Reset.Mode,
+					AtHour:      g.cfg.Session.Reset.AtHour,
+					IdleMinutes: g.cfg.Session.Reset.IdleMinutes,
+				}
+				resolved, rotated, err := g.sessions.CheckAndRotateIfStale(msg.SessionKey(), policy)
+				if err != nil {
+					log.Printf("[gateway] session freshness check error: %v", err)
+					resolved = g.sessions.Resolve(msg.SessionKey(), msg.SessionKey())
+				}
+				if rotated {
+					log.Printf("[gateway] session auto-rotated for %s", msg.SessionKey())
+				}
+				sessionKey = resolved
+				_ = g.sessions.Touch(msg.SessionKey())
 			}
 
 			var ch channel.Channel
@@ -376,16 +391,62 @@ func (g *Gateway) processLoop(ctx context.Context) {
 				}
 			}
 
-			// Non-streaming path
-			resp, err := g.runAgentResponse(msgCtx, msg.Content, sessionKey, msg.ContentBlocks)
-			if err != nil {
-				log.Printf("[gateway] agent error: %v", err)
+			// Pre-call memory flush check
+			if g.shouldFlushMemory(msg.SessionKey()) {
+				g.runMemoryFlush(msgCtx, msg.SessionKey(), sessionKey)
+			}
+
+			// Non-streaming path with overflow retry
+			maxRetries := g.cfg.AutoCompact.MaxOverflowRetry
+			if maxRetries <= 0 {
+				maxRetries = 3
+			}
+			if !g.cfg.AutoCompact.OverflowRetry {
+				maxRetries = 0
+			}
+
+			var resp *api.Response
+			var lastErr error
+			for attempt := 0; attempt <= maxRetries; attempt++ {
+				resp, lastErr = g.runAgentResponse(msgCtx, msg.Content, sessionKey, msg.ContentBlocks)
+				if lastErr == nil {
+					break
+				}
+				if !isContextOverflowError(lastErr) {
+					break
+				}
+				if attempt == maxRetries {
+					break
+				}
+				log.Printf("[gateway] context overflow (attempt %d/%d), compacting...", attempt+1, maxRetries)
+				if g.sessions == nil {
+					break
+				}
+				_, compactErr := g.compactAndRotate(msgCtx, msg.SessionKey(), sessionKey)
+				if compactErr != nil {
+					log.Printf("[gateway] overflow compact failed: %v", compactErr)
+					break
+				}
+				sessionKey = g.sessions.Resolve(msg.SessionKey(), msg.SessionKey())
+				log.Printf("[gateway] overflow compact succeeded, retrying with new session")
+			}
+
+			if lastErr != nil {
+				log.Printf("[gateway] agent error: %v", lastErr)
 				g.bus.Outbound <- bus.OutboundMessage{
 					Channel: msg.Channel,
 					ChatID:  msg.ChatID,
 					Content: "Sorry, I encountered an error processing your message.",
 				}
 				continue
+			}
+
+			// Update token usage after successful call
+			if resp != nil && resp.Result != nil && g.sessions != nil {
+				usage := resp.Result.Usage
+				if usage.TotalTokens > 0 {
+					_ = g.sessions.UpdateUsage(msg.SessionKey(), usage.TotalTokens, g.cfg.Agent.ContextWindow)
+				}
 			}
 
 			result := ""

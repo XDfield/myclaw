@@ -3,6 +3,7 @@
     "workspace": "~/.myclaw/workspace",
     "model": "claude-sonnet-4-5-20250929",
     "maxTokens": 8192,
+    "contextWindow": 200000,
     "temperature": 0.7,
     "maxToolIterations": 20
   },
@@ -53,6 +54,24 @@
   "skills": {
     "enabled": true,
     "dir": ""
+  },
+  "session": {
+    "reset": {
+      "mode": "daily",
+      "atHour": 4,
+      "idleMinutes": 120
+    }
+  },
+  "autoCompact": {
+    "enabled": true,
+    "threshold": 0.8,
+    "preserveCount": 5,
+    "overflowRetry": true,
+    "maxOverflowRetry": 3,
+    "memoryFlush": {
+      "enabled": true,
+      "softThresholdTokens": 4000
+    }
   },
   "gateway": {
     "host": "0.0.0.0",

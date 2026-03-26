@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -121,4 +122,26 @@ func metadataString(meta map[string]any, key string) string {
 		return ""
 	}
 	return strings.TrimSpace(fmt.Sprint(value))
+}
+
+func (g *Gateway) compactAndRotate(ctx context.Context, chatSessionKey, currentSessionID string) (string, error) {
+	prompt := "Create a compact continuation summary for this conversation. " +
+		"Capture goals, decisions, constraints, preferences, important file paths, " +
+		"open questions, and the best next steps. Write only the summary text."
+	summary, err := g.runAgent(ctx, prompt, currentSessionID, nil)
+	if err != nil {
+		return "", fmt.Errorf("generate compact summary: %w", err)
+	}
+	summary = strings.TrimSpace(summary)
+	if summary == "" {
+		return "", fmt.Errorf("compact summary is empty")
+	}
+	_, newSessionID, err := g.sessions.Rotate(chatSessionKey)
+	if err != nil {
+		return "", fmt.Errorf("rotate session: %w", err)
+	}
+	if err := seedSessionSummary(g.cfg.Agent.Workspace, newSessionID, summary); err != nil {
+		return "", fmt.Errorf("seed summary: %w", err)
+	}
+	return summary, nil
 }

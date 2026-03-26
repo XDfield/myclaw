@@ -36,6 +36,7 @@ type AgentConfig struct {
 	Workspace         string  `json:"workspace"`
 	Model             string  `json:"model"`
 	MaxTokens         int     `json:"maxTokens"`
+	ContextWindow     int     `json:"contextWindow,omitempty"` // model context window size in tokens, e.g. 200000
 	Temperature       float64 `json:"temperature"`
 	MaxToolIterations int     `json:"maxToolIterations"`
 }
@@ -135,9 +136,18 @@ type WebUIConfig struct {
 }
 
 type AutoCompactConfig struct {
-	Enabled       bool    `json:"enabled"`
-	Threshold     float64 `json:"threshold,omitempty"`
-	PreserveCount int     `json:"preserveCount,omitempty"`
+	Enabled          bool              `json:"enabled"`
+	Threshold        float64           `json:"threshold,omitempty"`
+	PreserveCount    int               `json:"preserveCount,omitempty"`
+	OverflowRetry    bool              `json:"overflowRetry,omitempty"`
+	MaxOverflowRetry int               `json:"maxOverflowRetry,omitempty"`
+	MemoryFlush      MemoryFlushConfig `json:"memoryFlush,omitempty"`
+}
+
+type MemoryFlushConfig struct {
+	Enabled             bool   `json:"enabled"`
+	SoftThresholdTokens int    `json:"softThresholdTokens,omitempty"`
+	Prompt              string `json:"prompt,omitempty"`
 }
 
 type TokenTrackingConfig struct {
@@ -174,9 +184,15 @@ func DefaultConfig() *Config {
 			Enabled: true,
 		},
 		AutoCompact: AutoCompactConfig{
-			Enabled:       true,
-			Threshold:     0.8,
-			PreserveCount: 5,
+			Enabled:          true,
+			Threshold:        0.8,
+			PreserveCount:    5,
+			OverflowRetry:    true,
+			MaxOverflowRetry: 3,
+			MemoryFlush: MemoryFlushConfig{
+				Enabled:             true,
+				SoftThresholdTokens: 4000,
+			},
 		},
 		Gateway: GatewayConfig{
 			Host: DefaultHost,

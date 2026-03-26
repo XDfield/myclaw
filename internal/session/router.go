@@ -18,7 +18,7 @@ type SessionState struct {
 	TotalTokens     int    `json:"totalTokens,omitempty"`     // for stage 3
 	ContextWindow   int    `json:"contextWindow,omitempty"`   // for stage 3
 	CompactionCount int    `json:"compactionCount,omitempty"` // for stage 3
-	MemoryFlushedAt int64  `json:"memoryFlushedAt,omitempty"` // for stage 3 (Unix ms)
+	MemoryFlushedAt int    `json:"memoryFlushedAt,omitempty"` // compactionCount snapshot at last flush
 }
 
 // Router maps channel-specific keys to session IDs with associated state.
@@ -286,7 +286,7 @@ func (r *Router) UpdateUsage(key string, totalTokens, contextWindow int) error {
 	return r.persistLocked()
 }
 
-// MarkMemoryFlushed sets the MemoryFlushedAt timestamp for the given key.
+// MarkMemoryFlushed records that a memory flush was performed for the current compaction cycle.
 func (r *Router) MarkMemoryFlushed(key string) error {
 	key = strings.TrimSpace(key)
 	if key == "" || r == nil {
@@ -300,7 +300,7 @@ func (r *Router) MarkMemoryFlushed(key string) error {
 	if !ok {
 		return nil
 	}
-	state.MemoryFlushedAt = nowMs()
+	state.MemoryFlushedAt = state.CompactionCount
 	r.sessions[key] = state
 	return r.persistLocked()
 }
