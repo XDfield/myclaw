@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -18,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stellarlinkco/myclaw/internal/config"
 	"github.com/stellarlinkco/myclaw/internal/gateway"
+	"github.com/stellarlinkco/myclaw/internal/logging"
 	"github.com/stellarlinkco/myclaw/internal/memory"
 	"github.com/stellarlinkco/myclaw/internal/skills"
 )
@@ -167,6 +167,15 @@ func init() {
 }
 
 func main() {
+	// Pre-load config to initialize logging before any command runs.
+	cfg, err := config.LoadConfig()
+	if err == nil {
+		logging.Init(cfg.Log)
+	} else {
+		// Fallback: initialize with defaults so logging works even if config fails.
+		logging.Init(logging.DefaultLogConfig())
+	}
+
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
@@ -655,7 +664,7 @@ func loadRuntimeSkills(cfg *config.Config) []api.SkillRegistration {
 
 	skillRegs, err := skills.LoadSkills(resolveSkillsDir(cfg))
 	if err != nil {
-		log.Printf("[agent] skills load warning: %v", err)
+		logging.Logger.Warn().Err(err).Msg("skills load warning")
 		return nil
 	}
 	return skillRegs
